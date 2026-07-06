@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 
-__all__ = ["SLACK_TEXT_CHUNK_LIMIT", "chunk_markdown"]
+__all__ = ["SLACK_TEXT_CHUNK_LIMIT", "chunk_markdown", "fence_quoted_tokens"]
 
 # Slack's Block Kit `section`/`mrkdwn` text object has a documented
 # 3,000-character limit; chunking to this boundary keeps every posted
@@ -31,6 +31,35 @@ __all__ = ["SLACK_TEXT_CHUNK_LIMIT", "chunk_markdown"]
 SLACK_TEXT_CHUNK_LIMIT: int = 3_000
 
 _FENCE_OPEN_RE = re.compile(r"^```(\S*)\s*$")
+
+# Every deterministic gate in this package (`dbt_fixer.allowlist`,
+# `dbt_fixer.reaudit`, `dbt_fixer.dbt_parse`, ...) reports its `reason`/
+# `detail` text using Python's own `!r` repr formatting, which quotes file
+# paths and other diagnostic literals in single quotes (or, occasionally,
+# double quotes, when the value itself contains a single quote). Per the
+# spec's "Typography of code" rule, a file path must never render as
+# unfenced prose in the Slack thread's gate-detail section -- so before
+# that text is posted, every such quoted token is rewritten as Slack
+# inline code (single backticks), which is the correct fencing for a
+# short token embedded inline in a sentence (a full ``` fenced block, by
+# contrast, is reserved for the diff itself).
+_QUOTED_TOKEN_RE = re.compile(r"'([^'\n]+)'|\"([^\"\n]+)\"")
+
+
+def fence_quoted_tokens(text: str) -> str:
+    """Rewrite every `'...'`/`"..."`-quoted token in `text` as `` `...` ``.
+
+    Used only on gate reason/detail text (never on the diff itself, which
+    is already fenced as a unified-diff code block) so a file path, regex
+    pattern, or line snippet quoted by a gate's `!r`-formatted reason
+    string is rendered as inline code rather than as unfenced prose.
+    """
+
+    def _sub(match: "re.Match[str]") -> str:
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+        return f"`{inner}`"
+
+    return _QUOTED_TOKEN_RE.sub(_sub, text)
 
 
 def chunk_markdown(text: str, *, max_chars: int = SLACK_TEXT_CHUNK_LIMIT) -> "list[str]":
