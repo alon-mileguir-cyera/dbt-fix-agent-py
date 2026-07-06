@@ -25,6 +25,9 @@ Environment-contract table (this module's slice of it):
 | `DBT_FIXER_SLACK_CHANNEL`      | no       | `None`              | n/a (free text; absent channel means Slack delivery is skipped, not an error) |
 | `DBT_FIXER_AUDITOR_PYTHON`     | no       | `None`              | n/a (free text path; absence is a hard `no_safe_fix` at re-audit-gate time, not here) |
 | `DBT_FIXER_MAX_ROUNDS`         | no       | `3`                 | non-numeric/out-of-`[1, 10]` -> falls back to `3`, records a warning |
+| `DBT_FIXER_MAX_CHANGED_FILES`  | no       | `5`                 | non-numeric/out-of-`[1, 50]` -> falls back to `5`, records a warning |
+| `DBT_FIXER_MAX_CHANGED_LINES`  | no       | `60`                | non-numeric/out-of-`[1, 2000]` -> falls back to `60`, records a warning |
+| `DBT_FIXER_REAUDIT_TIMEOUT_SECONDS` | no  | `120`               | non-numeric/out-of-`[1, 1800]` -> falls back to `120`, records a warning |
 
 `FixerConfig.warnings` carries every fallback-to-default explanation so a
 malformed value is never silently substituted -- it is always at least
@@ -46,6 +49,15 @@ _VALID_FAILURE_KINDS: tuple[str, ...] = ("ci", "audit")
 DEFAULT_MAX_ROUNDS = 3
 _MAX_ROUNDS_RANGE = (1, 10)  # sanity ceiling; never let a malformed-but-numeric value
 
+DEFAULT_MAX_CHANGED_FILES = 5
+_MAX_CHANGED_FILES_RANGE = (1, 50)
+
+DEFAULT_MAX_CHANGED_LINES = 60
+_MAX_CHANGED_LINES_RANGE = (1, 2000)
+
+DEFAULT_REAUDIT_TIMEOUT_SECONDS = 120
+_REAUDIT_TIMEOUT_SECONDS_RANGE = (1, 1800)
+
 ENV_FAILURE_KIND = "DBT_FIXER_FAILURE_KIND"
 ENV_REPO_PATH = "DBT_FIXER_REPO_PATH"
 ENV_PR_TITLE = "DBT_FIXER_PR_TITLE"
@@ -56,6 +68,9 @@ ENV_FAILURE_CONTEXT = "DBT_FIXER_FAILURE_CONTEXT"
 ENV_SLACK_CHANNEL = "DBT_FIXER_SLACK_CHANNEL"
 ENV_AUDITOR_PYTHON = "DBT_FIXER_AUDITOR_PYTHON"
 ENV_MAX_ROUNDS = "DBT_FIXER_MAX_ROUNDS"
+ENV_MAX_CHANGED_FILES = "DBT_FIXER_MAX_CHANGED_FILES"
+ENV_MAX_CHANGED_LINES = "DBT_FIXER_MAX_CHANGED_LINES"
+ENV_REAUDIT_TIMEOUT_SECONDS = "DBT_FIXER_REAUDIT_TIMEOUT_SECONDS"
 
 
 class EnvValidationError(ValueError):
@@ -81,6 +96,9 @@ class FixerConfig:
     slack_channel: Optional[str] = None
     auditor_python: Optional[str] = None
     max_rounds: int = DEFAULT_MAX_ROUNDS
+    max_changed_files: int = DEFAULT_MAX_CHANGED_FILES
+    max_changed_lines: int = DEFAULT_MAX_CHANGED_LINES
+    reaudit_timeout_seconds: float = DEFAULT_REAUDIT_TIMEOUT_SECONDS
 
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
@@ -101,6 +119,42 @@ def _parse_max_rounds(env: Mapping[str, str], warnings: list[str]) -> int:
         max_value=_MAX_ROUNDS_RANGE[1],
         warnings=warnings,
         caster=int,
+    )
+
+
+def _parse_max_changed_files(env: Mapping[str, str], warnings: list[str]) -> int:
+    return parse_bounded_number(
+        env,
+        ENV_MAX_CHANGED_FILES,
+        default=DEFAULT_MAX_CHANGED_FILES,
+        min_value=_MAX_CHANGED_FILES_RANGE[0],
+        max_value=_MAX_CHANGED_FILES_RANGE[1],
+        warnings=warnings,
+        caster=int,
+    )
+
+
+def _parse_max_changed_lines(env: Mapping[str, str], warnings: list[str]) -> int:
+    return parse_bounded_number(
+        env,
+        ENV_MAX_CHANGED_LINES,
+        default=DEFAULT_MAX_CHANGED_LINES,
+        min_value=_MAX_CHANGED_LINES_RANGE[0],
+        max_value=_MAX_CHANGED_LINES_RANGE[1],
+        warnings=warnings,
+        caster=int,
+    )
+
+
+def _parse_reaudit_timeout_seconds(env: Mapping[str, str], warnings: list[str]) -> float:
+    return parse_bounded_number(
+        env,
+        ENV_REAUDIT_TIMEOUT_SECONDS,
+        default=DEFAULT_REAUDIT_TIMEOUT_SECONDS,
+        min_value=_REAUDIT_TIMEOUT_SECONDS_RANGE[0],
+        max_value=_REAUDIT_TIMEOUT_SECONDS_RANGE[1],
+        warnings=warnings,
+        caster=float,
     )
 
 
@@ -131,6 +185,9 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> FixerConfig:
 
     warnings: list[str] = []
     max_rounds = _parse_max_rounds(env, warnings)
+    max_changed_files = _parse_max_changed_files(env, warnings)
+    max_changed_lines = _parse_max_changed_lines(env, warnings)
+    reaudit_timeout_seconds = _parse_reaudit_timeout_seconds(env, warnings)
 
     slack_channel = env.get(ENV_SLACK_CHANNEL) or None
     auditor_python = env.get(ENV_AUDITOR_PYTHON) or None
@@ -146,5 +203,8 @@ def load_config(env: Optional[Mapping[str, str]] = None) -> FixerConfig:
         slack_channel=slack_channel,
         auditor_python=auditor_python,
         max_rounds=max_rounds,
+        max_changed_files=max_changed_files,
+        max_changed_lines=max_changed_lines,
+        reaudit_timeout_seconds=reaudit_timeout_seconds,
         warnings=tuple(warnings),
     )

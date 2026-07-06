@@ -5,14 +5,20 @@ from __future__ import annotations
 import pytest
 
 from dbt_fixer.env import (
+    DEFAULT_MAX_CHANGED_FILES,
+    DEFAULT_MAX_CHANGED_LINES,
     DEFAULT_MAX_ROUNDS,
+    DEFAULT_REAUDIT_TIMEOUT_SECONDS,
     ENV_AUDITOR_PYTHON,
     ENV_FAILURE_KIND,
+    ENV_MAX_CHANGED_FILES,
+    ENV_MAX_CHANGED_LINES,
     ENV_MAX_ROUNDS,
     ENV_PR_DESCRIPTION,
     ENV_PR_DIFF,
     ENV_PR_TITLE,
     ENV_PR_URL,
+    ENV_REAUDIT_TIMEOUT_SECONDS,
     ENV_REPO_PATH,
     ENV_SLACK_CHANNEL,
     EnvValidationError,
@@ -76,6 +82,9 @@ def test_all_optional_fields_default_when_unset(tmp_path):
     assert config.slack_channel is None
     assert config.auditor_python is None
     assert config.max_rounds == DEFAULT_MAX_ROUNDS
+    assert config.max_changed_files == DEFAULT_MAX_CHANGED_FILES
+    assert config.max_changed_lines == DEFAULT_MAX_CHANGED_LINES
+    assert config.reaudit_timeout_seconds == DEFAULT_REAUDIT_TIMEOUT_SECONDS
     assert config.warnings == ()
 
 
@@ -90,6 +99,9 @@ def test_optional_fields_are_respected_when_set(tmp_path):
             ENV_SLACK_CHANNEL: "#data-eng-ci",
             ENV_AUDITOR_PYTHON: "/usr/bin/python3.11",
             ENV_MAX_ROUNDS: "2",
+            ENV_MAX_CHANGED_FILES: "10",
+            ENV_MAX_CHANGED_LINES: "200",
+            ENV_REAUDIT_TIMEOUT_SECONDS: "30",
         },
     )
     config = load_config(env)
@@ -100,6 +112,9 @@ def test_optional_fields_are_respected_when_set(tmp_path):
     assert config.slack_channel == "#data-eng-ci"
     assert config.auditor_python == "/usr/bin/python3.11"
     assert config.max_rounds == 2
+    assert config.max_changed_files == 10
+    assert config.max_changed_lines == 200
+    assert config.reaudit_timeout_seconds == 30
 
 
 @pytest.mark.parametrize("bad_value", ["not-a-number", "-1", "0", "999", "3.5"])
@@ -121,6 +136,56 @@ def test_valid_max_rounds_at_and_within_boundaries_is_respected(tmp_path, good_v
 
 def test_unset_max_rounds_produces_no_warning(tmp_path):
     config = load_config(_base_env(tmp_path))
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize("bad_value", ["not-a-number", "-1", "0", "999", "3.5"])
+def test_malformed_max_changed_files_falls_back_to_default(tmp_path, bad_value):
+    env = _base_env(tmp_path, **{ENV_MAX_CHANGED_FILES: bad_value})
+    config = load_config(env)
+    assert config.max_changed_files == DEFAULT_MAX_CHANGED_FILES
+    assert any(ENV_MAX_CHANGED_FILES in w for w in config.warnings)
+
+
+@pytest.mark.parametrize("good_value,expected", [("1", 1), ("50", 50), ("5", 5)])
+def test_valid_max_changed_files_at_and_within_boundaries_is_respected(tmp_path, good_value, expected):
+    env = _base_env(tmp_path, **{ENV_MAX_CHANGED_FILES: good_value})
+    config = load_config(env)
+    assert config.max_changed_files == expected
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize("bad_value", ["not-a-number", "-1", "0", "5000", "3.5"])
+def test_malformed_max_changed_lines_falls_back_to_default(tmp_path, bad_value):
+    env = _base_env(tmp_path, **{ENV_MAX_CHANGED_LINES: bad_value})
+    config = load_config(env)
+    assert config.max_changed_lines == DEFAULT_MAX_CHANGED_LINES
+    assert any(ENV_MAX_CHANGED_LINES in w for w in config.warnings)
+
+
+@pytest.mark.parametrize("good_value,expected", [("1", 1), ("2000", 2000), ("60", 60)])
+def test_valid_max_changed_lines_at_and_within_boundaries_is_respected(tmp_path, good_value, expected):
+    env = _base_env(tmp_path, **{ENV_MAX_CHANGED_LINES: good_value})
+    config = load_config(env)
+    assert config.max_changed_lines == expected
+    assert config.warnings == ()
+
+
+@pytest.mark.parametrize("bad_value", ["not-a-number", "-1", "0", "9999", "nan", "inf"])
+def test_malformed_reaudit_timeout_seconds_falls_back_to_default(tmp_path, bad_value):
+    env = _base_env(tmp_path, **{ENV_REAUDIT_TIMEOUT_SECONDS: bad_value})
+    config = load_config(env)
+    assert config.reaudit_timeout_seconds == DEFAULT_REAUDIT_TIMEOUT_SECONDS
+    assert any(ENV_REAUDIT_TIMEOUT_SECONDS in w for w in config.warnings)
+
+
+@pytest.mark.parametrize("good_value,expected", [("1", 1), ("1800", 1800), ("120", 120)])
+def test_valid_reaudit_timeout_seconds_at_and_within_boundaries_is_respected(
+    tmp_path, good_value, expected
+):
+    env = _base_env(tmp_path, **{ENV_REAUDIT_TIMEOUT_SECONDS: good_value})
+    config = load_config(env)
+    assert config.reaudit_timeout_seconds == expected
     assert config.warnings == ()
 
 
