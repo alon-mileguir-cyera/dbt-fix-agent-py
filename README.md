@@ -81,10 +81,75 @@ src/dbt_fixer/
   pipeline.py        # stage-1 orchestration: env + intake -> terminal RunResult or continue
   status.py          # the fixed proposed/no_safe_fix/failed vocabulary and glyphs
   logging_utils.py   # stderr-only diagnostic logging (stdout stays a clean machine surface)
+  pathsafe.py         # shared path-containment guard (rejects '..', absolute paths, symlink escapes)
+  tools/
+    repo_tools.py     # RepoTools: rooted, read-only file read/glob-search -- no write method exists
+  model_output.py      # tolerant-but-never-trusting JSON-object extraction from raw model text
+  proposal.py           # structured fix-proposal schema (whole_file_replace/line_range_edit) + bounded model pass
+  agent.py               # Bedrock/agno agent wiring; the only toolkit it builds exposes read/search only
+  applier.py              # fail-closed, two-phase application of a Proposal onto an isolated scratch copy
+  diffing.py               # pure difflib unified-diff generation, matching real `git diff` semantics
+  fix_pipeline.py           # Stage 2 orchestration: read -> propose -> apply -> diff, fully offline-testable
 ```
 
-Later sprints add the path-safe repo tools, the Bedrock-backed proposal
-pass, the scratch-copy edit applier and diff generation, the allowlist and
-re-audit gates, the fix-refuter and `dbt parse` gates, the bounded retry
-loop, and the Slack/stdout delivery contract — each with its own additions
-to this README's environment-contract tables.
+Later sprints add the allowlist and re-audit gates, the fix-refuter and
+`dbt parse` gates, the bounded retry loop, and the Slack/stdout delivery
+contract — each with its own additions to this README's environment-contract
+tables.
+
+## Sprint 2: path-safe repo tools, structured fix proposal, scratch-copy applier
+
+**No write tool is ever exposed to a model.** `dbt_fixer.tools.repo_tools.RepoTools`
+exposes exactly `read_file`/`search_files`, both scoped to a fixed repo root
+via `dbt_fixer.pathsafe.resolve_within_root` (rejects non-string/empty,
+absolute, and `..`-containing paths, and follows symlinks before the final
+containment check). `dbt_fixer.agent.build_repo_toolkit` wraps only those two
+methods as the `read_repo_file`/`search_repo_files` agno tools; there is no
+create/write/delete/rename capability reachable from anything a model can
+call. `read_file` raises `PathTraversalError` for a symlink that escapes the
+root; `search_files` instead silently excludes individual escaping matches
+found during glob enumeration (while still raising if the `pattern`/
+`relative_dir` arguments themselves attempt traversal).
+
+**Structured fix proposals are the only way a fix is ever proposed.**
+`dbt_fixer.proposal.parse_proposal` enforces a closed JSON schema (exact
+top-level and per-edit key sets, no extra fields, only the two edit types
+`whole_file_replace`/`line_range_edit`); any mismatch — malformed JSON, a
+missing field, an extra key, an unrecognized edit type, a single bad edit
+among otherwise-good ones — resolves to `None` ("no proposal"), never a
+partial or guessed acceptance. `dbt_fixer.proposal.run_proposal_pass` runs
+this behind the Sprint 1 `ExecutionBudget`: a turn is recorded before the
+model is ever called, and any `BoundedExecutionError` from the budget or the
+runner itself resolves to an honest no-proposal result rather than hanging.
+
+**Edits are applied only to an isolated scratch copy.** `dbt_fixer.applier.apply_proposal`
+validates every edit in a proposal (target exists, target is a file, every
+line range is in bounds, no two edits conflict) *before* mutating anything;
+a single invalid or conflicting edit raises a specific `ApplyError` subclass
+and leaves the scratch copy completely untouched. The original checkout
+(`dbt_fixer.env.FixerConfig.repo_path`) is never passed to the applier.
+
+**Diffs are pure-Python and match real `git diff`.** `dbt_fixer.diffing.generate_unified_diff`
+uses only `difflib.unified_diff` — no subprocess, no real git — and is
+verified byte-identical (aside from the `diff --git`/`index`/`new file mode`
+header lines, which are normalized away in the comparison) to a real `git
+diff` for add-only, delete-only, and mixed-change cases in
+`tests/real_process/test_diff_matches_git.py`, the one test module in this
+package marked `@pytest.mark.real_process`.
+
+`dbt_fixer.fix_pipeline.run_fix_pipeline` wires all of the above into the
+full Stage 2 sequence and is proven, offline, to produce byte-identical diff
+output across repeated runs of a fixed fake model runner against a fixed
+sample repo.
+
+Two additional, unprefixed environment variables (matching the sibling
+`dbt-audit-agent-py` package's operator convention, not part of the
+`DBT_FIXER_*` contract above) control Bedrock model selection:
+
+| Variable | Required | Default when unset |
+|---|---|---|
+| `BEDROCK_MODEL_ID` | no | `us.anthropic.claude-sonnet-5` |
+| `AWS_REGION` | no | `us-east-1` |
+
+AWS credentials are always resolved via boto3's default credential chain;
+no access key, secret key, or profile is ever hardcoded.
