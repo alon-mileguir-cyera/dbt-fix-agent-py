@@ -9,6 +9,13 @@ contract, defined once here so it can never drift between call sites:
   documented ``[min_value, max_value]`` range -- which also rejects negative
   and zero values whenever the range's floor is >= 1) falls back to the
   *same* documented default.
+- For float-typed bounds, a non-finite result (``nan``, ``inf``, ``-inf``,
+  or a value that overflows to infinity such as ``"1e400"``) is *always*
+  treated as malformed, even though ``float()`` parses it successfully.
+  This is checked explicitly, before the range comparison, because IEEE 754
+  makes every ordering comparison against NaN evaluate to ``False`` --
+  a naive ``value < min_value or value > max_value`` check would otherwise
+  silently treat NaN as "in range" and hand back a live NaN bound.
 - A malformed value is never clamped to the nearest bound. Clamping would
   turn a wildly-wrong operator input into a different, silently-chosen
   number; the only safe recovery from "we don't trust this value" is the
@@ -20,6 +27,7 @@ contract, defined once here so it can never drift between call sites:
 
 from __future__ import annotations
 
+import math
 from typing import Callable, List, Mapping, Optional, TypeVar, Union
 
 Number = Union[int, float]
@@ -53,6 +61,20 @@ def parse_bounded_number(
     except (TypeError, ValueError):
         warnings.append(
             f"{name}={raw!r} is not a valid number; falling back to default {default!r}"
+        )
+        return default
+
+    # NaN/inf/-inf are "numeric but not a usable bound": IEEE 754 makes every
+    # ordering comparison against NaN evaluate to False, so a plain
+    # ``value < min_value or value > max_value`` check silently lets NaN
+    # slide through as if it were in-range. Reject any non-finite float
+    # explicitly, before the range check, so a value like "nan"/"inf"/"-inf"
+    # is always treated as malformed and never becomes a live bound (which
+    # for a timeout would mean the timeout can never fire).
+    if isinstance(value, float) and not math.isfinite(value):
+        warnings.append(
+            f"{name}={raw!r} is not a finite number (got {value!r}); "
+            f"falling back to default {default!r}"
         )
         return default
 

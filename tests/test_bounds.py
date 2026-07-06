@@ -62,6 +62,33 @@ def test_out_of_range_timeout_falls_back():
     assert warnings
 
 
+@pytest.mark.parametrize(
+    "bad_value",
+    ["nan", "NaN", "+nan", "-nan", " nan ", "inf", "-inf", "Infinity", "1e400"],
+)
+def test_non_finite_timeout_falls_back_and_never_disables_the_timeout(bad_value):
+    """Regression test: NaN/inf-adjacent float strings must never bypass the
+    range check via IEEE-754 comparison semantics (every ordering comparison
+    against NaN is False, so a naive `value < min or value > max` check would
+    silently treat NaN as "in range"). A live NaN timeout bound would make
+    `ExecutionBudget.check_timeout()` never fire, disabling the wall-clock
+    timeout entirely -- exactly the hang-forever failure mode this primitive
+    exists to prevent.
+    """
+
+    bounds, warnings = load_bounds({ENV_TIMEOUT_SECONDS: bad_value})
+    assert bounds.timeout_seconds == DEFAULT_TIMEOUT_SECONDS
+    assert warnings and ENV_TIMEOUT_SECONDS in warnings[0]
+
+    # Also prove the resulting budget actually enforces the timeout: with a
+    # NaN bound bypassing the guard, this would never raise.
+    clock = FakeClock()
+    budget = ExecutionBudget(bounds, clock=clock)
+    clock.advance(DEFAULT_TIMEOUT_SECONDS + 1)
+    with pytest.raises(TimeoutExceededError):
+        budget.check_timeout()
+
+
 @pytest.mark.parametrize("bad_value", ["nope", "-1", "0"])
 def test_malformed_max_tool_calls_falls_back(bad_value):
     bounds, warnings = load_bounds({ENV_MAX_TOOL_CALLS: bad_value})

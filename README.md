@@ -59,6 +59,15 @@ None of these variables ever raise: an out-of-range or non-numeric value
 degrades to the documented default rather than crashing the process or
 silently clamping to the nearest valid bound.
 
+`DBT_FIXER_TIMEOUT_SECONDS` is float-typed, so it also explicitly rejects
+non-finite values that `float()` would otherwise parse successfully --
+`nan`, `inf`, `-inf`, and overflow strings like `1e400` all fall back to
+`300` with a recorded warning, exactly like any other malformed value. This
+is checked ahead of the range comparison because IEEE 754 makes every
+ordering comparison against NaN evaluate to `False`, which would otherwise
+let a NaN timeout silently pass the `[1, 3600]` range check and permanently
+disable the wall-clock timeout it's supposed to enforce.
+
 ## Package layout
 
 ```
