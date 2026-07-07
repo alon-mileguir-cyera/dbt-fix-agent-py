@@ -31,10 +31,28 @@ exactly like every other numeric bound in this package (see
 The primitive itself is deliberately clock-injectable (`clock` parameter)
 so tests can simulate exceeding any bound without a real sleep -- there is
 no code path in this module that performs an actual wall-clock wait.
+
+**`run_with_hard_timeout`.** Every external-boundary call this package
+makes -- a model runner (the fix-refuter gate, the proposal pass) or a
+subprocess runner (the re-audit gate, the dbt parse gate) -- is bounded not
+just by the cooperative `ExecutionBudget` above but by this module's other
+primitive: a *hard*, interrupting wall-clock timeout that does not depend
+on the callee cooperating at all. `run_with_hard_timeout` runs the given
+zero-argument callable in a daemon background thread and returns as soon
+as either the callable finishes or `timeout_seconds` elapses, whichever is
+first -- so a callee that blocks, sleeps, or hangs forever (a stalled model
+API call, a `dbt parse` invocation stuck on a network mount, a
+deliberately-adversarial test fake) can never hang the calling thread, and
+never blocks process/interpreter exit either (the worker thread is a
+daemon). Every module in this package that needs a hard timeout around an
+untrusted external call routes through this one function, so "bounded by a
+timeout" always means the exact same enforcement mechanism everywhere.
 """
 
 from __future__ import annotations
 
+import queue
+import threading
 from dataclasses import dataclass
 from typing import Callable, List, Mapping, Optional, Tuple
 
@@ -198,3 +216,40 @@ class ExecutionBudget:
                 f"turn limit of {self._bounds.max_turns} exceeded (turns_taken={self._turns})"
             )
         return self._turns
+
+
+def run_with_hard_timeout(
+    func: Callable[[], object], timeout_seconds: float
+) -> Tuple[str, object]:
+    """Invoke `func()` in a daemon thread, bounded by `timeout_seconds`.
+
+    Returns a `(kind, value)` pair:
+
+    - `("ok", return_value)` if `func` returned normally within the bound;
+    - `("error", exception)` if `func` raised within the bound;
+    - `("timeout", None)` if neither happened before `timeout_seconds`
+      elapsed.
+
+    The worker thread is a daemon, so a `func` that blocks, sleeps, or
+    hangs forever (a stalled model call, a stuck subprocess, a
+    deliberately-adversarial test fake) can never block this function
+    itself past `timeout_seconds`, nor block process/interpreter exit.
+    This is the one shared hard-interrupting-timeout mechanism every
+    external-boundary call in this package must route through.
+    """
+
+    result_queue: "queue.Queue[tuple[str, object]]" = queue.Queue(maxsize=1)
+
+    def _target() -> None:
+        try:
+            result_queue.put(("ok", func()))
+        except Exception as exc:  # the callee is an untrusted external boundary
+            result_queue.put(("error", exc))
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+
+    try:
+        return result_queue.get(timeout=timeout_seconds)
+    except queue.Empty:
+        return ("timeout", None)

@@ -29,10 +29,20 @@ real meaning.
 `subprocess_runner` are both injectable so this module is exercised with
 zero real subprocess or filesystem-PATH access in tests, matching
 `conftest.py`'s enforced offline contract. A real `subprocess_runner`
-implementation is expected to translate an actual timeout into
-`DbtParseTimeoutError` and a genuine invocation failure (e.g. the
-executable vanished between the `which` check and the call) into
-`DbtInvocationError`; this module never spawns a subprocess directly.
+implementation is expected to translate a genuine invocation failure
+(e.g. the executable vanished between the `which` check and the call)
+into `DbtInvocationError`; this module never spawns a subprocess directly.
+
+**Real, interrupting bounded timeout.** `subprocess_runner` is never
+trusted to enforce `timeout_seconds` on its own -- a fake (in a test) or a
+real implementation that itself hangs, blocks, or otherwise fails to
+respect the bound must not be able to hang this gate. The call is wrapped
+in the shared `dbt_fixer.bounds.run_with_hard_timeout` primitive (the same
+daemon-thread-plus-queue mechanism the fix-refuter gate uses), so a
+runner that never returns still resolves this gate to `"failed"` within
+`timeout_seconds`, never a hang. A `DbtParseTimeoutError` raised by the
+runner itself (a real implementation that detected its own timeout) is
+handled identically to a hard-timeout resolution.
 """
 
 from __future__ import annotations
@@ -42,6 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, List, Literal, Optional, Tuple
 
+from .bounds import run_with_hard_timeout
 from .diffparse import DiffParseError, PatchApplyError, _diff_paths, apply_diff
 from .pathsafe import PathTraversalError, resolve_within_root
 from .reaudit import ProcessOutcome
@@ -82,6 +93,13 @@ class DbtParseTimeoutError(RuntimeError):
     failure (`"failed"`, killing the candidate) -- the executable ran, and
     simply did not finish in time, which is itself meaningful signal about
     the candidate, not an environment problem.
+
+    A real `subprocess_runner` implementation may raise this itself if it
+    detects its own timeout; equally, `run_dbt_parse_gate` never relies on
+    that cooperation -- the runner call is always additionally wrapped in
+    `dbt_fixer.bounds.run_with_hard_timeout`, so a runner that hangs
+    instead of raising is caught by that hard, interrupting bound just the
+    same.
     """
 
 
@@ -246,19 +264,44 @@ def run_dbt_parse_gate(
 
             project_dir_display = _display_relative(project_dir, scratch_root)
 
-            try:
-                outcome = subprocess_runner([dbt_path, "parse"], project_dir, timeout_seconds)
-            except DbtParseTimeoutError as exc:
+            # `subprocess_runner` is never trusted to enforce `timeout_seconds`
+            # on its own: the call is wrapped in the shared hard-timeout
+            # primitive so a runner that blocks/hangs instead of raising
+            # still resolves this gate to "failed" within the bound.
+            kind, value = run_with_hard_timeout(
+                lambda: subprocess_runner([dbt_path, "parse"], project_dir, timeout_seconds),
+                timeout_seconds,
+            )
+
+            if kind == "timeout":
                 return DbtParseVerdict(
                     outcome="failed",
-                    reason=f"dbt parse timed out after {timeout_seconds}s: {exc}",
+                    reason=(
+                        f"dbt parse did not return within the {timeout_seconds}s bounded "
+                        "timeout; treated as failed"
+                    ),
                     project_dir=project_dir_display,
                 )
-            except DbtInvocationError as exc:
+
+            if kind == "error":
+                exc = value
+                if isinstance(exc, DbtParseTimeoutError):
+                    return DbtParseVerdict(
+                        outcome="failed",
+                        reason=f"dbt parse timed out after {timeout_seconds}s: {exc}",
+                        project_dir=project_dir_display,
+                    )
+                if isinstance(exc, DbtInvocationError):
+                    return DbtParseVerdict(
+                        outcome="skipped",
+                        reason=f"dbt could not be invoked: {exc}",
+                    )
                 return DbtParseVerdict(
                     outcome="skipped",
-                    reason=f"dbt could not be invoked: {exc}",
+                    reason=f"dbt parse subprocess runner raised an unexpected error: {exc!r}",
                 )
+
+            outcome = value
     except ScratchCopyError as exc:
         return DbtParseVerdict(
             outcome="skipped",

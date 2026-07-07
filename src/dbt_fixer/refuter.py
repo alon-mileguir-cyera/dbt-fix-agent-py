@@ -32,20 +32,21 @@ the candidate, not defend it.
 only ever checks its wall-clock timeout at explicit call boundaries (before
 a tool call or a turn) -- it cannot interrupt a call already in progress.
 This gate needs to actually stop waiting on a runner that is genuinely
-hung, so `_call_with_timeout` runs the runner in a daemon background
-thread and waits on it via a `queue.Queue.get(timeout=...)`; a
-`queue.Empty` resolves to `refuted=True` with a timeout reason, without
-ever needing to forcibly kill the thread (it is a daemon, so a
-still-hung fake in a test can never block process/interpreter exit).
+hung, so `_call_with_timeout` delegates to the shared
+`dbt_fixer.bounds.run_with_hard_timeout` primitive, which runs the runner
+in a daemon background thread and waits on it via a
+`queue.Queue.get(timeout=...)`; a timeout resolves to `refuted=True` with
+a timeout reason, without ever needing to forcibly kill the thread (it is
+a daemon, so a still-hung fake in a test can never block
+process/interpreter exit).
 """
 
 from __future__ import annotations
 
-import queue
-import threading
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from .bounds import run_with_hard_timeout
 from .fencing import FencedContext, fence_field
 from .model_output import extract_json_object
 
@@ -196,31 +197,16 @@ def parse_refuter_response(raw: object) -> Optional[RefuterResponse]:
 def _call_with_timeout(
     runner: RefuterRunner, prompt: str, timeout_seconds: float
 ) -> "tuple[str, object]":
-    """Invoke `runner(prompt)` in a daemon thread, bounded by `timeout_seconds`.
+    """Invoke `runner(prompt)`, bounded by `timeout_seconds`.
 
     Returns a `(kind, value)` pair: `("ok", raw_text)` on a clean return,
     `("error", exception)` if the runner raised, or `("timeout", None)` if
-    no result arrived within `timeout_seconds`. The worker thread is a
-    daemon, so a fake in a test that never returns can never block process
-    or interpreter exit, and this function itself never blocks longer than
-    `timeout_seconds` regardless of what the runner does afterward.
+    no result arrived within `timeout_seconds`. Thin wrapper around the
+    shared `dbt_fixer.bounds.run_with_hard_timeout` primitive -- see that
+    function for the actual daemon-thread enforcement mechanism.
     """
 
-    result_queue: "queue.Queue[tuple[str, object]]" = queue.Queue(maxsize=1)
-
-    def _target() -> None:
-        try:
-            result_queue.put(("ok", runner(prompt)))
-        except Exception as exc:  # the runner is an untrusted external boundary
-            result_queue.put(("error", exc))
-
-    thread = threading.Thread(target=_target, daemon=True)
-    thread.start()
-
-    try:
-        return result_queue.get(timeout=timeout_seconds)
-    except queue.Empty:
-        return ("timeout", None)
+    return run_with_hard_timeout(lambda: runner(prompt), timeout_seconds)
 
 
 def run_fix_refuter_gate(

@@ -8,6 +8,8 @@ never a real PATH lookup or a real subprocess -- matching the
 from __future__ import annotations
 
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import List
 
@@ -133,6 +135,63 @@ def test_gate_kills_candidate_on_timeout(tmp_path):
     assert verdict.outcome == "failed"
     assert verdict.passed is False
     assert "timed out" in verdict.reason.lower()
+
+
+def test_gate_kills_candidate_when_runner_blocks_past_timeout(tmp_path):
+    """`dbt_parse_gate_bounded_timeout`: the subprocess call is wrapped in a
+    hard, interrupting wall-clock timeout -- a runner that itself never
+    raises `DbtParseTimeoutError` but simply sleeps past the bound must
+    still resolve to `"failed"`, promptly, never a hang."""
+
+    repo = _make_repo(tmp_path)
+    diff = _candidate_diff(repo, tmp_path, "select 1\nfrom x\nwhere y = 1\n")
+
+    def slow_runner(argv, cwd, timeout_seconds):
+        time.sleep(0.5)
+        return ProcessOutcome(returncode=0, stdout="", stderr="")
+
+    start = time.monotonic()
+    verdict = run_dbt_parse_gate(
+        repo_root=repo,
+        candidate_diff=diff,
+        timeout_seconds=0.05,
+        subprocess_runner=slow_runner,
+        which=_fake_which(),
+    )
+    elapsed = time.monotonic() - start
+
+    assert verdict.outcome == "failed"
+    assert verdict.passed is False
+    assert "timeout" in verdict.reason.lower() or "timed out" in verdict.reason.lower()
+    # The gate must return promptly, not wait for the slow runner to finish.
+    assert elapsed < 0.4
+
+
+def test_gate_kills_candidate_when_runner_hangs_forever_without_hanging_the_test(tmp_path):
+    """A runner that never returns at all (blocks on an event that's never
+    set) must not hang the gate or the test -- the daemon-thread hard
+    timeout must still resolve this within `timeout_seconds`."""
+
+    repo = _make_repo(tmp_path)
+    diff = _candidate_diff(repo, tmp_path, "select 1\nfrom x\nwhere y = 1\n")
+
+    def hangs_forever(argv, cwd, timeout_seconds):
+        threading.Event().wait()  # never set; would block forever off a daemon thread
+        return ProcessOutcome(returncode=0, stdout="", stderr="")  # unreachable
+
+    start = time.monotonic()
+    verdict = run_dbt_parse_gate(
+        repo_root=repo,
+        candidate_diff=diff,
+        timeout_seconds=0.05,
+        subprocess_runner=hangs_forever,
+        which=_fake_which(),
+    )
+    elapsed = time.monotonic() - start
+
+    assert verdict.outcome == "failed"
+    assert verdict.passed is False
+    assert elapsed < 0.4
 
 
 def test_gate_finds_nested_project_dir(tmp_path):
