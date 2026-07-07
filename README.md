@@ -75,6 +75,8 @@ one clearly-marked real-process integration module).
 | `DBT_FIXER_MAX_CHANGED_FILES` | no | `5` | Non-numeric, or outside `[1, 50]` → falls back to `5` and records a warning. Enforced by the Sprint 3 allowlist gate. |
 | `DBT_FIXER_MAX_CHANGED_LINES` | no | `60` | Non-numeric, or outside `[1, 2000]` → falls back to `60` and records a warning. Enforced by the Sprint 3 allowlist gate. |
 | `DBT_FIXER_REAUDIT_TIMEOUT_SECONDS` | no | `120` | Non-numeric, or outside `[1, 1800]` → falls back to `120` and records a warning. Bounds the Sprint 3 re-audit gate's subprocess call. |
+| `DBT_FIXER_REFUTER_TIMEOUT_SECONDS` | no | `60` | Non-numeric, or outside `[1, 600]` → falls back to `60` and records a warning. Bounds the Sprint 4 fix-refuter gate's model call; a timeout resolves to a fail-closed "refuted" verdict, never a skipped gate. |
+| `DBT_FIXER_DBT_PARSE_TIMEOUT_SECONDS` | no | `30` | Non-numeric, or outside `[1, 300]` → falls back to `30` and records a warning. Bounds any `dbt parse`-style structural-validation subprocess call. |
 
 ### Bounded-execution primitive (`dbt_fixer.bounds`)
 
