@@ -59,7 +59,10 @@ def _default_secrets_manager_client_factory() -> SecretsManagerClient:
     import boto3  # local import: keeps boto3 an optional cost only paid
     # when Secrets Manager retrieval is actually attempted.
 
-    return boto3.client("secretsmanager")
+    import os
+
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+    return boto3.client("secretsmanager", region_name=region)
 
 
 def _fetch_from_secrets_manager(

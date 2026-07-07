@@ -53,6 +53,20 @@ _CI_TEST_FAILURE_RE = re.compile(
 
 _AUDIT_STATUS_RE = re.compile(r"dbt-auditor-status:\s*verdict=(?P<verdict>\w+)")
 
+# The REAL rendered auditor report (dbt_auditor.report.render_report) is
+# markdown: a "# <glyph> Verdict: **BLOCKED**" banner and one
+# "### <Name> (`identifier`)" section per check carrying
+# "**State:** **FAIL|PASS|UNCONFIRMED**" and a blockquoted "**Evidence:**".
+_REAL_VERDICT_RE = re.compile(r"^#\s+.*?Verdict:\s*\*\*(?P<verdict>[A-Z_]+)\*\*", re.MULTILINE)
+_REAL_SECTION_RE = re.compile(
+    r"^###\s+.+?\(`(?P<id>[a-z0-9_]+)`\)\s*$(?P<body>.*?)(?=^###\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_REAL_STATE_RE = re.compile(r"\*\*State:\*\*\s*\*\*(?P<state>[A-Z]+)\*\*")
+_REAL_EVIDENCE_RE = re.compile(
+    r"\*\*Evidence:\*\*\s*(?P<quote>(?:^>.*$\n?)+)", re.MULTILINE
+)
+
 _AUDIT_CHECK_RE = re.compile(
     r"-\s*check:\s*(?P<id>[^\n]+)\n"
     r"(?:[ \t]*status:\s*(?P<status>[^\n]+)\n)?"
@@ -126,6 +140,37 @@ def _parse_audit_report(raw: str) -> Tuple[FailingCheck, ...]:
     return tuple(checks)
 
 
+def _parse_real_audit_report(raw: str) -> Tuple[Tuple[FailingCheck, ...], Optional[str], bool]:
+    """Parse the real rendered auditor report markdown.
+
+    Returns ``(failing_checks, verdict, recognized)``. ``recognized`` is
+    True when the text is structurally a real report (verdict banner
+    present), regardless of whether any actionable failing check was
+    found. UNCONFIRMED sections (a failed-audit artifact's skeleton) are
+    deliberately never treated as fixable targets.
+    """
+    verdict_match = _REAL_VERDICT_RE.search(raw)
+    if verdict_match is None:
+        return (), None, False
+    verdict = verdict_match.group("verdict").upper()
+
+    checks = []
+    for match in _REAL_SECTION_RE.finditer(raw):
+        body = match.group("body")
+        state_match = _REAL_STATE_RE.search(body)
+        if state_match is None or state_match.group("state") != "FAIL":
+            continue
+        evidence = ""
+        evidence_match = _REAL_EVIDENCE_RE.search(body)
+        if evidence_match is not None:
+            evidence = "\n".join(
+                line.lstrip("> ").rstrip()
+                for line in evidence_match.group("quote").splitlines()
+            ).strip()
+        checks.append(FailingCheck(identifier=match.group("id"), evidence=evidence))
+    return tuple(checks), verdict, True
+
+
 def parse_failure_target(
     kind: FailureKind, raw_failure_context: str
 ) -> Tuple[Optional[FailureTarget], Optional[str]]:
@@ -155,11 +200,27 @@ def parse_failure_target(
         return FailureTarget(kind="ci", checks=checks), None
 
     if kind == "audit":
+        # Primary: the REAL rendered report markdown the auditor produces
+        # (via DBT_AUDITOR_REPORT_PATH or Slack). The legacy machine format
+        # below remains as a fallback.
+        real_checks, real_verdict, recognized = _parse_real_audit_report(raw)
+        if recognized:
+            if real_verdict == "PASSED":
+                return None, "audit verdict is PASSED; there is nothing to fix"
+            if not real_checks:
+                return None, (
+                    f"report verdict is {real_verdict} but contains no check in "
+                    "State FAIL (an UNCONFIRMED-only skeleton is a failed-audit "
+                    "artifact, not a fixable finding)"
+                )
+            return FailureTarget(kind="audit", checks=real_checks), None
+
         verdict_match = _AUDIT_STATUS_RE.search(raw)
         if verdict_match is None and "check:" not in raw:
             return None, (
                 "failure_context does not match a recognized auditor report format "
-                "(no 'dbt-auditor-status: verdict=...' line or '- check:' entries found)"
+                "(no verdict banner, 'dbt-auditor-status: verdict=...' line, or "
+                "'- check:' entries found)"
             )
         if verdict_match is not None and verdict_match.group("verdict").upper() != "BLOCKED":
             return None, (

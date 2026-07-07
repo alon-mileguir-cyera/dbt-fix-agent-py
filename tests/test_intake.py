@@ -193,3 +193,85 @@ def test_resolve_intake_audit_success(tmp_path):
     assert result.ok
     assert result.target.kind == "audit"
     assert result.target.identifiers == ("schema_test:not_null_orders_customer_id",)
+
+
+# ---------------------------------------------------------------------------
+# the REAL rendered auditor report format (dbt_auditor.report.render_report)
+# ---------------------------------------------------------------------------
+
+REAL_BLOCKED_REPORT = """<!-- dbt-auditor-report-id:kind=dbt-adversarial-audit|repo=cyeragit/bi-dbt|pr=2500 -->
+
+# \U0001f6d1 Verdict: **BLOCKED**
+
+## \U0001f6a8 Critical Issues
+
+- **Schema Contract Verification** (`schema_contract_verification`) - **FAILED** (score: 0/100)
+
+> schema.yml declares id with unique+not_null but the SQL unions 4 regions.
+
+## Checks
+
+### Tenant Isolation Integrity (`tenant_isolation_integrity`)
+
+**Severity:** Critical
+
+**Score:** 95/100 &nbsp;&nbsp; **State:** **PASS**
+
+**Evidence:**
+
+> tenantId is carried through unchanged.
+
+### Schema Contract Verification (`schema_contract_verification`)
+
+**Severity:** Critical
+
+**Score:** 0/100 &nbsp;&nbsp; **State:** **FAIL**
+
+**Evidence:**
+
+> _raw_etl_history__models.yml declares id with both unique and not_null tests.
+> The model SQL sets id from uid independently in 4 UNION ALL branches.
+
+**Reasoning:** The declared contract overpromises uniqueness.
+"""
+
+REAL_ARTIFACT_REPORT = """<!-- dbt-auditor-report-id:kind=dbt-adversarial-audit|repo=cyeragit/bi-dbt|pr=2500 -->
+
+# \U0001f6d1 Verdict: **BLOCKED**
+
+## Checks
+
+### Tenant Isolation Integrity (`tenant_isolation_integrity`)
+
+**Severity:** Critical
+
+**Status:** ⚠️ **Incomplete data for this check** (no result was reported for this check)
+
+**Score:** N/A &nbsp;&nbsp; **State:** **UNCONFIRMED**
+
+**Evidence:**
+
+> _No evidence was provided for this check._
+"""
+
+
+def test_real_blocked_report_parses_failing_checks_with_evidence():
+    target, reason = parse_failure_target("audit", REAL_BLOCKED_REPORT)
+    assert reason is None and target is not None
+    assert [c.identifier for c in target.checks] == ["schema_contract_verification"]
+    assert "unique and not_null" in target.checks[0].evidence
+
+
+def test_real_artifact_report_is_rejected_not_fixed():
+    target, reason = parse_failure_target("audit", REAL_ARTIFACT_REPORT)
+    assert target is None
+    assert "artifact" in reason
+
+
+def test_real_passed_report_has_nothing_to_fix():
+    passed = REAL_BLOCKED_REPORT.replace("**BLOCKED**", "**PASSED**").replace(
+        "**State:** **FAIL**", "**State:** **PASS**"
+    )
+    target, reason = parse_failure_target("audit", passed)
+    assert target is None
+    assert "nothing to fix" in reason
