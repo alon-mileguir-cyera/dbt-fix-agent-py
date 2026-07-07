@@ -354,3 +354,70 @@ def test_runner_comfortably_under_timeout_completes_normally():
     )
     assert verdict.passed is True
     assert verdict.refuted is False
+
+
+# ---------------------------------------------------------------------------
+# narration-around-JSON rescue (mirror of the proposal finalization fix)
+# ---------------------------------------------------------------------------
+
+
+def _fenced_ok(reason="no flaw"):
+    import json
+    return json.dumps({"refuted": False, "could_not_refute": True, "reason": reason})
+
+
+def test_narrated_refuter_answer_is_rescued_by_finalization():
+    from dbt_fixer.fencing import fence_context
+    from dbt_fixer.refuter import run_fix_refuter_gate
+
+    calls = []
+    def runner(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return "Based on my investigation:\n" + _fenced_ok()  # preamble breaks strict parse
+        return _fenced_ok()  # clean on the finalization re-prompt
+
+    verdict = run_fix_refuter_gate(
+        fenced_context=fence_context({"failure_context": "x"}),
+        candidate_diff="diff",
+        refuter_runner=runner,
+        timeout_seconds=30.0,
+    )
+    assert verdict.passed and not verdict.refuted
+    assert len(calls) == 2
+    assert "previous response did not consist solely" in calls[1]
+
+
+def test_rescued_refutation_still_refutes():
+    from dbt_fixer.fencing import fence_context
+    from dbt_fixer.refuter import run_fix_refuter_gate
+    import json
+
+    def runner(prompt):
+        # narrated first, then a clean but REFUTING answer -> must fail closed
+        if "previous response" in prompt:
+            return json.dumps({"refuted": True, "could_not_refute": False, "reason": "drift found"})
+        return "Here is my finding: " + json.dumps(
+            {"refuted": True, "could_not_refute": False, "reason": "drift found"}
+        )
+
+    verdict = run_fix_refuter_gate(
+        fenced_context=fence_context({"failure_context": "x"}),
+        candidate_diff="diff",
+        refuter_runner=runner,
+        timeout_seconds=30.0,
+    )
+    assert not verdict.passed and verdict.refuted
+
+
+def test_second_miss_still_fails_closed():
+    from dbt_fixer.fencing import fence_context
+    from dbt_fixer.refuter import run_fix_refuter_gate
+
+    verdict = run_fix_refuter_gate(
+        fenced_context=fence_context({"failure_context": "x"}),
+        candidate_diff="diff",
+        refuter_runner=lambda p: "narration, never any json at all",
+        timeout_seconds=30.0,
+    )
+    assert not verdict.passed and verdict.refuted

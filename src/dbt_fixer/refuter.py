@@ -124,6 +124,27 @@ both true, and do not set both false -- if you are not confident either
 way, you must not fabricate confidence in either direction, but note this
 is not a safe answer and the candidate will be rejected on any answer that
 is not an unambiguous "could_not_refute": true.
+
+CRITICAL OUTPUT RULE: your ENTIRE response must be the single JSON object
+and nothing else - no preamble, no "Based on my investigation:", no
+markdown prose before or after it. Narrating your findings around the JSON
+(rather than putting them in the "reason" field) makes your answer
+unparseable, which is counted as a refutation. When you are done
+investigating, output only the JSON.
+"""
+
+# When the refuter narrates around otherwise-valid JSON (agentic models
+# habitually do), one bounded, tool-free re-prompt asks for only the JSON.
+# This never weakens the fail-closed contract: a rescued answer must still
+# be a clean, unambiguous could_not_refute to let a candidate pass; any
+# second miss is still counted as refuted.
+REFUTER_FINALIZATION_INSTRUCTIONS = """Your previous response did not consist solely of the required JSON object.
+Based ONLY on the analysis you already did (below), output the single JSON
+object now, in exactly the schema you were given (refuted, could_not_refute,
+reason). No tool calls, no prose, nothing outside the JSON.
+
+## Your previous response
+
 """
 
 
@@ -287,6 +308,21 @@ def run_fix_refuter_gate(
 
     raw_text = value if isinstance(value, str) else None
     parsed = parse_refuter_response(value)
+
+    if parsed is None and raw_text:
+        # Narration-around-valid-JSON rescue: one bounded, tool-free
+        # re-prompt for the JSON alone. Fail-closed is preserved - only a
+        # clean, unambiguous could_not_refute below lets the candidate pass.
+        fkind, fvalue = _call_with_timeout(
+            refuter_runner,
+            REFUTER_FINALIZATION_INSTRUCTIONS + raw_text[-6000:],
+            timeout_seconds,
+        )
+        if fkind == "ok":
+            reparsed = parse_refuter_response(fvalue)
+            if reparsed is not None:
+                parsed = reparsed
+                raw_text = fvalue if isinstance(fvalue, str) else raw_text
 
     if parsed is None:
         return RefuterVerdict(
