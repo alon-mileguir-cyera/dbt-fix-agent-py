@@ -27,7 +27,7 @@ Environment-contract table (this module's slice of it):
 | `DBT_FIXER_MAX_ROUNDS`         | no       | `3`                 | non-numeric/out-of-`[1, 10]` -> falls back to `3`, records a warning |
 | `DBT_FIXER_MAX_CHANGED_FILES`  | no       | `5`                 | non-numeric/out-of-`[1, 50]` -> falls back to `5`, records a warning |
 | `DBT_FIXER_MAX_CHANGED_LINES`  | no       | `60`                | non-numeric/out-of-`[1, 2000]` -> falls back to `60`, records a warning |
-| `DBT_FIXER_REAUDIT_TIMEOUT_SECONDS` | no  | `120`               | non-numeric/out-of-`[1, 1800]` -> falls back to `120`, records a warning |
+| `DBT_FIXER_REAUDIT_TIMEOUT_SECONDS` | no  | `900`               | non-numeric/out-of-`[1, 1800]` -> falls back to `900`, records a warning |
 | `DBT_FIXER_REFUTER_TIMEOUT_SECONDS` | no  | `60`                | non-numeric/out-of-`[1, 600]` -> falls back to `60`, records a warning |
 | `DBT_FIXER_DBT_PARSE_TIMEOUT_SECONDS` | no | `30`               | non-numeric/out-of-`[1, 300]` -> falls back to `30`, records a warning |
 
@@ -61,7 +61,10 @@ _MAX_CHANGED_FILES_RANGE = (1, 50)
 DEFAULT_MAX_CHANGED_LINES = 60
 _MAX_CHANGED_LINES_RANGE = (1, 2000)
 
-DEFAULT_REAUDIT_TIMEOUT_SECONDS = 120
+# The re-audit is a FULL sealed-auditor run (multi-pass Bedrock: primary +
+# self-refutation + confirm-the-pass) - live runs measure 3-7+ minutes.
+# 120s guaranteed a mid-flight kill on every real diff (e2e run 9).
+DEFAULT_REAUDIT_TIMEOUT_SECONDS = 900
 _REAUDIT_TIMEOUT_SECONDS_RANGE = (1, 1800)
 
 DEFAULT_REFUTER_TIMEOUT_SECONDS = 60
