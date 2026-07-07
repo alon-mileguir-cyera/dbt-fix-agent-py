@@ -27,6 +27,13 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# By default, exclude the one real-process integration module (and any test
+# anywhere else explicitly marked `real_process`) from collection. It shells
+# out to a real `git` binary and/or hits the network to prove properties the
+# rest of the (fully offline) suite cannot -- see tests/real_process/ and the
+# README's "Running the tests" section. Run it explicitly with:
+#   pytest -m real_process tests/real_process
+addopts = "-m 'not real_process'"
 markers = [
-    "real_process: allows real subprocess/network access in this test module (exempt from the offline-only conftest guard).",
+    "real_process: allows real subprocess/network access in this test module (exempt from the offline-only conftest guard, and excluded from collection by default -- see addopts above).",
 ]
