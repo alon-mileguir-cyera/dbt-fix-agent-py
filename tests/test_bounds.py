@@ -197,3 +197,71 @@ def test_execution_budget_defaults_to_real_monotonic_clock():
     # must not raise; proves the default clock works without a fake
     budget.check_timeout()
     assert budget.elapsed_seconds >= 0
+
+
+# --- reusable, model-agnostic: driven by a fake, non-agno callable ---------
+
+
+def run_a_fake_non_agno_conversation(budget: ExecutionBudget, turns) -> int:
+    """A stand-in for *any* model-calling loop -- deliberately with zero
+    import of, or type dependency on, agno or any specific model client.
+    Each "turn" is just a plain Python callable taking the budget and
+    returning how many tool calls it wants to make that turn.
+
+    This is the shape `ExecutionBudget`'s public interface (`record_turn`,
+    `record_tool_call`, `check_timeout`) is meant to be driven through by
+    *any* caller, real agent framework or otherwise -- there is nothing
+    agno-specific anywhere on `ExecutionBudget` or `Bounds`.
+    """
+
+    turns_completed = 0
+    for turn_fn in turns:
+        budget.record_turn()
+        n_tool_calls = turn_fn(budget)
+        for _ in range(n_tool_calls):
+            budget.record_tool_call()
+        turns_completed += 1
+    return turns_completed
+
+
+def test_generic_non_agno_driver_respects_tool_call_cap():
+    clock = FakeClock()
+    budget = ExecutionBudget(Bounds(timeout_seconds=1000, max_tool_calls=3, max_turns=100), clock=clock)
+
+    # a fake "conversation": three turns, each a plain closure with no
+    # dependency on any model client, requesting 2 tool calls apiece.
+    turns = [lambda b: 2, lambda b: 2, lambda b: 2]
+
+    with pytest.raises(ToolCallCapExceededError):
+        run_a_fake_non_agno_conversation(budget, turns)
+
+    # the cap fired partway through, not before any progress was made
+    assert budget.tool_calls_used > budget.bounds.max_tool_calls - 2
+
+
+def test_generic_non_agno_driver_respects_turn_cap():
+    clock = FakeClock()
+    budget = ExecutionBudget(Bounds(timeout_seconds=1000, max_tool_calls=100, max_turns=2), clock=clock)
+
+    turns = [lambda b: 0, lambda b: 0, lambda b: 0]
+
+    with pytest.raises(TurnLimitExceededError):
+        run_a_fake_non_agno_conversation(budget, turns)
+
+    assert budget.turns_used == 3  # the failing turn still counted before raising
+
+
+def test_generic_non_agno_driver_respects_timeout_mid_conversation():
+    clock = FakeClock()
+    budget = ExecutionBudget(Bounds(timeout_seconds=5, max_tool_calls=100, max_turns=100), clock=clock)
+
+    def _slow_turn(_budget: ExecutionBudget) -> int:
+        clock.advance(10)
+        return 0
+
+    # the first turn itself completes, but its own slowness blows the
+    # timeout, which the *next* turn's `record_turn()` call must catch.
+    turns = [_slow_turn, lambda b: 0]
+
+    with pytest.raises(TimeoutExceededError):
+        run_a_fake_non_agno_conversation(budget, turns)

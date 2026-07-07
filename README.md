@@ -14,6 +14,36 @@ sprint's modules; later sprints add their own rows to the tables below as
 their features (Bedrock model access, Slack delivery, the auditor subprocess
 integration) land.
 
+## Invocation and the stdout contract
+
+```
+python -m dbt_fixer.entrypoint
+```
+
+reads its entire configuration from the `DBT_FIXER_*` environment
+variables documented below, **always exits `0`**, and prints exactly one
+line matching `^dbt-fixer-status: (proposed|no_safe_fix|failed)$` as the
+*last* line of stdout — this is the only line a caller needs to grep. When
+the run has a specific reason to report (every `failed` and `no_safe_fix`
+outcome does), a `dbt-fixer-reason: <single-line reason>` line precedes it.
+
+No input — a missing required variable, a malformed value, an empty or
+unparseable failure context, or a genuinely unexpected internal error —
+ever produces a non-zero exit code or a raw traceback as the last thing
+printed; every one of those cases resolves to `failed` (environment/
+internal problems) or `no_safe_fix` (an honest "nothing to fix" or
+"identified but couldn't act on it" conclusion) with a stated reason.
+
+**This sprint's entrypoint only wires Stage 1** (environment validation +
+failure-context intake, `dbt_fixer.pipeline.run_stage1`). The
+structured-fix-proposal pass and the allowlist/re-audit/fix-refuter/
+dbt-parse gates exist as library modules but are not yet invoked from the
+entrypoint, so `proposed` cannot be produced by a real invocation yet —
+even a cleanly-identified failure target resolves to `no_safe_fix` with a
+reason naming the target and stating that no fix pipeline ran. A later
+sprint's contract wires that pipeline into this same entrypoint without
+changing this stdout contract.
+
 ## Running the tests
 
 ```
@@ -75,6 +105,7 @@ disable the wall-clock timeout it's supposed to enforce.
 
 ```
 src/dbt_fixer/
+  entrypoint.py     # python -m dbt_fixer.entrypoint: always-exit-0, single-status-line CLI contract
   env.py            # DBT_FIXER_* required/optional contract, fail-closed on required
   bounds.py          # timeout/tool-call-cap/turn-limit primitive, fail-safe on malformed
   _numeric.py        # shared fail-safe numeric-bound parsing helper
