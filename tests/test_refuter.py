@@ -173,6 +173,70 @@ def test_parse_accepts_exact_schema():
     assert parsed == RefuterResponse(refuted=False, could_not_refute=True, reason="clean")
 
 
+def test_parse_rejects_prose_wrapped_fenced_json():
+    # The exact regression case from evaluation feedback: a model that
+    # hedges with commentary around an otherwise schema-valid fenced JSON
+    # object must not be accepted -- the refuter's strict-JSON contract has
+    # no tolerance for surrounding prose, unlike the Sprint 2 proposal
+    # parser's deliberately tolerant `extract_json_object`.
+    raw = (
+        "Sure thing, here is my analysis...\n"
+        "```json\n"
+        '{"refuted": false, "could_not_refute": true, "reason": "looks fine"}\n'
+        "```\n"
+        "Hope that helps!"
+    )
+    assert parse_refuter_response(raw) is None
+
+
+def test_parse_rejects_multiple_fenced_json_objects():
+    raw = (
+        "```json\n"
+        '{"refuted": false, "could_not_refute": false, "reason": "draft"}\n'
+        "```\n"
+        "```json\n"
+        '{"refuted": false, "could_not_refute": true, "reason": "final"}\n'
+        "```"
+    )
+    assert parse_refuter_response(raw) is None
+
+
+def test_gate_treats_prose_wrapped_fenced_json_as_refuted():
+    # Full end-to-end reproduction via the gate entrypoint: a runner
+    # returning valid-looking JSON wrapped in chatty prose must resolve to
+    # a failed (refuted) verdict, never `passed=True`.
+    runner = lambda prompt: (
+        "Sure thing, here is my analysis...\n"
+        "```json\n"
+        '{"refuted": false, "could_not_refute": true, "reason": "looks fine"}\n'
+        "```\n"
+        "Hope that helps!"
+    )
+    verdict = run_fix_refuter_gate(
+        fenced_context=_fenced_context(),
+        candidate_diff="--- a/models/a.sql\n+++ b/models/a.sql\n+select 1\n",
+        refuter_runner=runner,
+        timeout_seconds=5.0,
+    )
+    assert verdict.passed is False
+    assert verdict.refuted is True
+
+
+def test_gate_treats_multiple_json_objects_as_refuted():
+    runner = lambda prompt: (
+        '{"refuted": false, "could_not_refute": false, "reason": "draft"}\n'
+        '{"refuted": false, "could_not_refute": true, "reason": "final"}'
+    )
+    verdict = run_fix_refuter_gate(
+        fenced_context=_fenced_context(),
+        candidate_diff="--- a/models/a.sql\n+++ b/models/a.sql\n+select 1\n",
+        refuter_runner=runner,
+        timeout_seconds=5.0,
+    )
+    assert verdict.passed is False
+    assert verdict.refuted is True
+
+
 def test_gate_treats_schema_violation_as_refuted():
     runner = lambda prompt: json.dumps({"refuted": False, "reason": "missing flag"})
     verdict = run_fix_refuter_gate(

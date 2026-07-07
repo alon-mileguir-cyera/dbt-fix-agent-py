@@ -28,6 +28,22 @@ defaults to *not* refuted on ambiguity because there the safe default is
 "the candidate fix is rejected" -- because this gate's job is to distrust
 the candidate, not defend it.
 
+**Strict, non-tolerant JSON extraction.** Unlike the Sprint 2 structured-fix
+proposal pass, which parses its model output through the deliberately
+tolerant `dbt_fixer.model_output.extract_json_object` (built to dig a JSON
+object out of surrounding reasoning prose or pick the last of several
+fenced blocks), `parse_refuter_response` here goes through
+`dbt_fixer.model_output.extract_strict_json_object` instead. A refuter
+response is accepted only when, after stripping whitespace, it is *exactly*
+one JSON object -- either bare or as the sole content of a single fenced
+block -- and nothing else. Any prose commentary surrounding an otherwise
+valid fenced JSON object, or more than one JSON object/fenced block in the
+response, fails to parse and therefore resolves to `refuted=True` exactly
+like any other malformed response. The refuter is the strict, adversarial,
+fail-closed backstop; it must never reward a hedging, chatty answer with a
+successful parse just because a JSON object happens to be findable
+somewhere inside it.
+
 **Real, interrupting bounded timeout.** `dbt_fixer.bounds.ExecutionBudget`
 only ever checks its wall-clock timeout at explicit call boundaries (before
 a tool call or a turn) -- it cannot interrupt a call already in progress.
@@ -48,7 +64,7 @@ from typing import Callable, Optional
 
 from .bounds import run_with_hard_timeout
 from .fencing import FencedContext, fence_field
-from .model_output import extract_json_object
+from .model_output import extract_strict_json_object
 
 __all__ = [
     "RefuterRunner",
@@ -163,17 +179,26 @@ def build_refuter_prompt(fenced_context: FencedContext, candidate_diff: str) -> 
 def parse_refuter_response(raw: object) -> Optional[RefuterResponse]:
     """Parse raw model output into a `RefuterResponse`, or `None` if invalid.
 
-    Returns `None` (never raises) for: unparseable/non-JSON text, a JSON
-    value that is not an object, an object missing any of the three
-    required top-level keys, an object with any extra top-level key, or
-    any key holding the wrong type (`refuted`/`could_not_refute` must be
-    actual booleans -- `bool` is a subclass of `int` in Python, but the
-    reverse coercion, e.g. accepting `1`/`0`, is never performed here;
-    `reason` must be a string). A single schema violation invalidates the
-    whole response rather than being coerced or partially trusted.
+    Uses `dbt_fixer.model_output.extract_strict_json_object`, not the
+    tolerant `extract_json_object` the Sprint 2 proposal pass uses: the
+    refuter's contract is "exactly one JSON object and nothing else," so a
+    response with prose wrapped around an otherwise-valid fenced JSON
+    object, or more than one JSON object/fenced block, must fail to parse
+    here rather than being dug out on a best-effort basis.
+
+    Returns `None` (never raises) for: unparseable/non-JSON text, prose
+    surrounding an otherwise-valid JSON object or fence, more than one
+    fenced block or JSON object, a JSON value that is not an object, an
+    object missing any of the three required top-level keys, an object
+    with any extra top-level key, or any key holding the wrong type
+    (`refuted`/`could_not_refute` must be actual booleans -- `bool` is a
+    subclass of `int` in Python, but the reverse coercion, e.g. accepting
+    `1`/`0`, is never performed here; `reason` must be a string). A single
+    schema violation invalidates the whole response rather than being
+    coerced or partially trusted.
     """
 
-    parsed = extract_json_object(raw)
+    parsed = extract_strict_json_object(raw)
     if parsed is None:
         return None
 
