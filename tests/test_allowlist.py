@@ -365,7 +365,6 @@ def test_multi_project_models_paths_are_allowed():
 
     diff = (
         "diff --git a/bi-dbt-multiregion/models/staging/x/_m.yml b/bi-dbt-multiregion/models/staging/x/_m.yml\n"
-        "new file mode 100644\n"
         "--- /dev/null\n"
         "+++ b/bi-dbt-multiregion/models/staging/x/_m.yml\n"
         "@@ -0,0 +1 @@\n"
