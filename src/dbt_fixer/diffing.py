@@ -23,7 +23,7 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Literal, Optional, Tuple
+from typing import Iterable, List, Literal, Optional
 
 ChangeKind = Literal["added", "deleted", "modified"]
 

@@ -52,6 +52,7 @@ def run_fix_pipeline(
     runner: ModelRunner,
     budget: ExecutionBudget,
     feedback: Optional[str] = None,
+    preloaded_files: Optional[str] = None,
 ) -> FixPipelineResult:
     """Run one full, offline, read-propose-apply-diff pipeline pass.
 
@@ -77,7 +78,7 @@ def run_fix_pipeline(
     """
 
     repo_root = Path(repo_root)
-    prompt = build_proposal_prompt(fenced_context, feedback)
+    prompt = build_proposal_prompt(fenced_context, feedback, preloaded_files)
     pass_result = run_proposal_pass(runner, prompt, budget)
 
     if not pass_result.ok:

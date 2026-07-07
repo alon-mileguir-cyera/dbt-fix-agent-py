@@ -50,7 +50,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Literal, Optional, Tuple
+from typing import Callable, Iterable, Literal, Optional, Tuple
 
 from .bounds import run_with_hard_timeout
 from .diffparse import DiffParseError, PatchApplyError, _diff_paths, apply_diff

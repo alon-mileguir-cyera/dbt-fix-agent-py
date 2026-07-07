@@ -48,7 +48,11 @@ from ._numeric import parse_bounded_number
 FailureKind = Literal["ci", "audit"]
 _VALID_FAILURE_KINDS: tuple[str, ...] = ("ci", "audit")
 
-DEFAULT_MAX_ROUNDS = 3
+# One proposal through the full gate stack by default. Each retry round
+# re-runs the expensive gates (a full re-audit + refuter), which in the
+# shadow phase multiplied wall-clock past the budget without improving a
+# simple fix. Operators can raise DBT_FIXER_MAX_ROUNDS when warranted.
+DEFAULT_MAX_ROUNDS = 1
 _MAX_ROUNDS_RANGE = (1, 10)  # sanity ceiling; never let a malformed-but-numeric value
 
 DEFAULT_MAX_CHANGED_FILES = 5

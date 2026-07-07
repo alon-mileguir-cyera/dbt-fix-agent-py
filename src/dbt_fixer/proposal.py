@@ -22,12 +22,15 @@ than hanging or looping.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Callable, Literal, Optional, Tuple
+from pathlib import Path
+from typing import Callable, Literal, Optional, Sequence, Tuple
 
 from .bounds import BoundedExecutionError, ExecutionBudget
 from .fencing import FencedContext
 from .model_output import extract_json_object
+from .pathsafe import resolve_within_root
 
 EditKind = Literal["whole_file_replace", "line_range_edit"]
 
@@ -192,7 +195,69 @@ def parse_proposal(raw: object) -> Optional[Proposal]:
     return Proposal(edits=tuple(edits), rationale=rationale.strip())
 
 
-def build_proposal_prompt(fenced_context: FencedContext, feedback: Optional[str] = None) -> str:
+# File-path shapes worth pre-loading: the dbt models/schema files a finding
+# can name. Matched inside evidence/suggestion prose.
+_PATH_RE = re.compile(r"[\w./-]+\.(?:sql|ya?ml)", re.IGNORECASE)
+_MAX_PRELOAD_FILES = 6
+_MAX_PRELOAD_BYTES = 40_000  # per file; a huge file is truncated, never skipped silently
+
+
+def extract_named_paths(evidence_texts: Sequence[str]) -> tuple[str, ...]:
+    """Pull distinct repo-relative-looking file paths out of finding text.
+
+    Order-preserving and de-duplicated. Purely lexical - every extracted
+    path is still resolved path-safely against the repo root before any
+    read, so a traversal-shaped match can never escape the checkout.
+    """
+    seen: dict[str, None] = {}
+    for text in evidence_texts:
+        for match in _PATH_RE.findall(text or ""):
+            candidate = match.strip().lstrip("/")
+            if candidate and candidate not in seen:
+                seen[candidate] = None
+    return tuple(seen)[:_MAX_PRELOAD_FILES]
+
+
+def render_preloaded_files(repo_root: "str | Path", paths: Sequence[str]) -> str:
+    """Render the current contents of the named files as a prompt section.
+
+    Deterministic, path-safe, and read-only: this is exactly what the model
+    would otherwise spend tool calls rediscovering. A path that escapes the
+    root, doesn't exist, or can't be read is silently skipped (the model
+    can still fall back to its own tools). Returns "" when nothing loads,
+    so the prompt is byte-identical to the pre-seed-free version.
+    """
+    root = Path(repo_root)
+    blocks: list[str] = []
+    for rel in paths:
+        try:
+            resolved = resolve_within_root(root, rel)
+        except Exception:
+            continue
+        try:
+            text = resolved.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        if len(text.encode("utf-8")) > _MAX_PRELOAD_BYTES:
+            text = text.encode("utf-8")[:_MAX_PRELOAD_BYTES].decode("utf-8", "ignore")
+            text += "\n... [truncated for prompt size] ..."
+        blocks.append(f"### `{rel}`\n\n```\n{text}\n```")
+    if not blocks:
+        return ""
+    return (
+        "## Files named in the findings (pre-loaded for you)\n\n"
+        "These are the current contents of the repo files the findings "
+        "reference, at the PR head. Prefer working from these directly; only "
+        "use your read/search tools for anything not shown here.\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+def build_proposal_prompt(
+    fenced_context: FencedContext,
+    feedback: Optional[str] = None,
+    preloaded_files: Optional[str] = None,
+) -> str:
     """Build the full prompt for the structured-fix-proposal pass.
 
     The fenced context is rendered and appended verbatim (see
@@ -210,6 +275,8 @@ def build_proposal_prompt(fenced_context: FencedContext, feedback: Optional[str]
     """
 
     parts = [PROPOSAL_INSTRUCTIONS.strip(), fenced_context.render()]
+    if preloaded_files:
+        parts.append(preloaded_files)
     if feedback:
         parts.append(f"## Previous attempt feedback\n\n{feedback}")
     return "\n\n".join(parts)

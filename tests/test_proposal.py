@@ -362,3 +362,50 @@ def test_run_proposal_pass_records_a_turn_before_calling_runner() -> None:
     run_proposal_pass(lambda prompt: "{}", "prompt", budget)
 
     assert budget.turns_used == 1
+
+
+# ---------------------------------------------------------------------------
+# pre-loaded named files (kill the exploration phase for a simple fix)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_named_paths_finds_sql_and_yml_dedup_and_ordered():
+    from dbt_fixer.proposal import extract_named_paths
+
+    ev = [
+        "models/staging/_x__models.yml declares id unique; models/staging/x.sql unions 4 regions",
+        "again models/staging/x.sql and models/staging/_x__models.yml",
+    ]
+    paths = extract_named_paths(ev)
+    assert paths == ("models/staging/_x__models.yml", "models/staging/x.sql")
+
+
+def test_render_preloaded_files_reads_within_root_and_skips_escapes(tmp_path):
+    from dbt_fixer.proposal import render_preloaded_files
+
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "x.sql").write_text("select 1 as id")
+    rendered = render_preloaded_files(
+        tmp_path, ["models/x.sql", "../../etc/passwd", "models/missing.sql"]
+    )
+    assert "select 1 as id" in rendered
+    assert "models/x.sql" in rendered
+    assert "passwd" not in rendered  # traversal skipped
+    assert "missing.sql" not in rendered  # nonexistent skipped
+
+
+def test_render_preloaded_files_empty_when_nothing_resolves(tmp_path):
+    from dbt_fixer.proposal import render_preloaded_files
+
+    assert render_preloaded_files(tmp_path, ["nope.sql", "../escape.yml"]) == ""
+
+
+def test_build_proposal_prompt_includes_preloaded_section_when_present():
+    from dbt_fixer.fencing import fence_context
+    from dbt_fixer.proposal import build_proposal_prompt
+
+    fenced = fence_context({"failure_context": "x"})
+    with_pre = build_proposal_prompt(fenced, None, "## Files named in the findings (pre-loaded for you)\n\nBODY")
+    without = build_proposal_prompt(fenced, None, None)
+    assert "pre-loaded for you" in with_pre
+    assert "pre-loaded for you" not in without  # byte-identical to pre-seed-free path

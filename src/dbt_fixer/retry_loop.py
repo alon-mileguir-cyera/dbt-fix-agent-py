@@ -57,7 +57,7 @@ regardless of which round or gate is the one that ends the attempt.
 from __future__ import annotations
 
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -67,6 +67,7 @@ from .dbt_parse import DbtParseVerdict, DbtSubprocessRunner, WhichFunc, run_dbt_
 from .env import FixerConfig
 from .fencing import FencedContext
 from .fix_pipeline import run_fix_pipeline
+from .proposal import extract_named_paths, render_preloaded_files
 from .intake import FailureTarget
 from .proposal import ModelRunner
 from .reaudit import ReAuditVerdict, SubprocessRunner, run_reaudit_gate
@@ -175,6 +176,14 @@ def run_bounded_fix_attempt(
     )
     originally_failing_ids: Tuple[str, ...] = target.identifiers
 
+    # Pre-load the files the findings name, once, so the model doesn't burn
+    # its tool-call/wall-clock budget rediscovering what the audit already
+    # pointed at. Path-safe and best-effort; "" when nothing resolves.
+    _named_paths = extract_named_paths(
+        [c.evidence for c in target.checks] + [c.suggestion for c in target.checks]
+    )
+    preloaded_files = render_preloaded_files(repo_root, _named_paths)
+
     feedback: Optional[str] = None
     last_reason = "no candidate was proposed"
     last_gates: list[GateResult] = []
@@ -185,7 +194,8 @@ def run_bounded_fix_attempt(
             rounds_used = round_num
 
             pipeline_result = run_fix_pipeline(
-                repo_root, fenced_context, model_runner, budget, feedback=feedback
+                repo_root, fenced_context, model_runner, budget,
+                feedback=feedback, preloaded_files=preloaded_files,
             )
             if not pipeline_result.ok:
                 last_reason = pipeline_result.reason or "no proposal was produced"

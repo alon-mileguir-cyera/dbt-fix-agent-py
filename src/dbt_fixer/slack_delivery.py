@@ -48,7 +48,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Protocol
 
-from .delivery_common import SLACK_TEXT_CHUNK_LIMIT, chunk_markdown, fence_quoted_tokens
+from .delivery_common import SLACK_TEXT_CHUNK_LIMIT, chunk_markdown
 from .redaction import redact_secrets
 from .secrets import SecretsManagerClient, get_slack_bot_token
 from .status import RunResult
