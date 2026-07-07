@@ -533,8 +533,10 @@ def test_detail_thread_has_breakdown_and_apply_hint():
     )
     assert "*Proposed patch*" in text
     assert "git apply" in text
-    assert "creates `a.yml` (+1 lines)" in text
-    assert "```diff" in text
+    assert "*Create a new file* `a.yml` (1 lines) with exactly this content:" in text
+    assert "```yaml\nx\n```" in text  # created file shown as plain content, not a diff
+    assert "*Raw patch*" in text
+    assert "```diff" in text  # the appliable artifact is still there
 
 
 def test_malformed_diff_degrades_to_no_change_line():
@@ -549,3 +551,30 @@ def test_malformed_diff_degrades_to_no_change_line():
         candidate_diff="complete garbage, not a diff",
     )
     assert "*Proposed change:*" not in text  # presentation never fabricates
+
+
+def test_modified_file_keeps_diff_hunks_in_plain_rendering():
+    from dbt_fixer.slack_delivery import _render_plain_changes
+
+    diff = (
+        "diff --git a/m.sql b/m.sql\n--- a/m.sql\n+++ b/m.sql\n"
+        "@@ -1,2 +1,2 @@\n-select 1\n+select 2\n"
+    )
+    text = _render_plain_changes(diff)
+    assert "*Edit* `m.sql`" in text
+    assert "lines starting with `-` are removed" in text
+    assert "-select 1" in text and "+select 2" in text
+
+
+def test_created_yml_renders_as_complete_file_content():
+    from dbt_fixer.slack_delivery import _render_plain_changes
+
+    diff = (
+        "diff --git a/x/_m__models.yml b/x/_m__models.yml\n"
+        "--- /dev/null\n+++ b/x/_m__models.yml\n@@ -0,0 +1,2 @@\n"
+        "+version: 2\n+models: []\n"
+    )
+    text = _render_plain_changes(diff)
+    assert "*Create a new file* `x/_m__models.yml` (2 lines)" in text
+    assert "```yaml\nversion: 2\nmodels: []\n```" in text
+    assert "@@" not in text  # no diff noise for a brand-new file

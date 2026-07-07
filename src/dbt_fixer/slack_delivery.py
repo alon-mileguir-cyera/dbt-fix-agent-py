@@ -184,15 +184,84 @@ def _build_summary_text(
     )
 
 
+_FENCE_LANGUAGE_BY_SUFFIX = {
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".sql": "sql",
+    ".md": "",
+}
+
+
+def _split_diff_per_file(diff_text: str) -> "list[tuple[str, list[str]]]":
+    """Split a unified diff into (path, lines-of-that-file's-block) pairs."""
+
+    blocks: "list[tuple[str, list[str]]]" = []
+    current_lines: "Optional[list[str]]" = None
+    for line in (diff_text or "").splitlines():
+        if line.startswith("diff --git "):
+            parts = line.split()
+            path = parts[-1][2:] if parts[-1].startswith("b/") else parts[-1]
+            current_lines = [line]
+            blocks.append((path, current_lines))
+        elif current_lines is not None:
+            current_lines.append(line)
+    return blocks
+
+
+def _render_plain_changes(diff_text: str) -> str:
+    """The human-first rendering: say what each file change IS, in the form
+    a reviewer actually wants.
+
+    A created file is shown as its complete content ("create this file at
+    this path") -- a diff of nothing-into-everything is noise. A modified
+    file keeps its diff hunks (before/after is exactly what a diff is good
+    at). A deletion is stated in one line. Purely presentational: the raw
+    patch below remains the authoritative, appliable artifact.
+    """
+
+    sections: "list[str]" = []
+    for path, lines in _split_diff_per_file(diff_text):
+        created = any(line.startswith("--- ") and line[4:].strip() == "/dev/null" for line in lines)
+        deleted = any(line.startswith("+++ ") and line[4:].strip() == "/dev/null" for line in lines)
+        if created:
+            content = [
+                line[1:]
+                for line in lines
+                if line.startswith("+") and not line.startswith("+++")
+            ]
+            suffix = "." + path.rsplit(".", 1)[-1] if "." in path else ""
+            language = _FENCE_LANGUAGE_BY_SUFFIX.get(suffix, "")
+            body = "\n".join(content)
+            sections.append(
+                f"*Create a new file* `{path}` ({len(content)} lines) with exactly"
+                f" this content:\n```{language}\n{body}\n```"
+            )
+        elif deleted:
+            sections.append(f"*Delete the file* `{path}`.")
+        else:
+            hunks = "\n".join(lines)
+            sections.append(
+                f"*Edit* `{path}` -- lines starting with `-` are removed,"
+                f" lines starting with `+` are added:\n```diff\n{hunks}\n```"
+            )
+    return "\n\n".join(sections)
+
+
 def _build_detail_text(run_result: RunResult, *, candidate_diff: str) -> str:
     diff_body = candidate_diff.strip() if candidate_diff else ""
     if diff_body:
-        file_lines = _summarize_diff_files(diff_body)
-        breakdown = ("\n".join(f"\u2022 {line}" for line in file_lines) + "\n") if file_lines else ""
+        plain = _render_plain_changes(diff_body)
+        plain_section = (
+            "*Proposed patch* -- verified by the gate stack; a human must"
+            " still review it and apply it to the PR branch:\n\n" + plain
+            if plain
+            else "*Proposed patch* -- verified by the gate stack; a human must"
+            " still review it and apply it to the PR branch."
+        )
         diff_section = (
-            "*Proposed patch* -- verified by the gate stack above; a human"
-            " must still review and apply it (`git apply` on the PR branch):\n"
-            f"{breakdown}"
+            f"{plain_section}\n\n"
+            "*Raw patch* (machine-appliable: save as `fix.patch`, then"
+            " `git apply fix.patch` on the PR branch):\n"
             f"```diff\n{diff_body}\n```"
         )
     else:
