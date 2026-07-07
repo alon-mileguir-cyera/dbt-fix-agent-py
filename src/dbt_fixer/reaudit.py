@@ -43,6 +43,7 @@ absence for a `kind="ci"` run (which never needs it) is not an error.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -125,22 +126,66 @@ def build_auditor_env(
     pr_title: str,
     pr_description: str,
     pr_url: str,
+    report_path: "Optional[str | Path]" = None,
 ) -> Dict[str, str]:
     """Build the sealed auditor's real `DBT_AUDITOR_*` env contract for this run.
 
     Always sets shadow mode on and deliberately never sets
     `DBT_AUDITOR_SLACK_CHANNEL` -- the re-audit gate never lets the sealed
     auditor post anywhere on this run's behalf.
+
+    The ambient passthrough is load-bearing (live e2e finding, run 8): the
+    auditor authenticates to Bedrock via AWS_* env vars; a bare env leaves
+    it credential-starved and every re-audit fails as an artifact. The
+    execution knobs are equally load-bearing: the auditor's package default
+    (120s/pass) guarantees timeouts on real diffs.
     """
 
-    return {
-        "DBT_AUDITOR_REPO_PATH": str(repo_path),
-        "DBT_AUDITOR_PR_DIFF": pr_diff,
-        "DBT_AUDITOR_PR_TITLE": pr_title,
-        "DBT_AUDITOR_PR_DESCRIPTION": pr_description,
-        "DBT_AUDITOR_PR_URL": pr_url,
-        "DBT_AUDITOR_SHADOW_MODE": "true",
-    }
+    import os
+
+    env: Dict[str, str] = {}
+    for key in _AMBIENT_PASSTHROUGH_KEYS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    env.update(
+        {
+            "DBT_AUDITOR_REPO_PATH": str(repo_path),
+            "DBT_AUDITOR_PR_DIFF": pr_diff,
+            "DBT_AUDITOR_PR_TITLE": pr_title,
+            "DBT_AUDITOR_PR_DESCRIPTION": pr_description,
+            "DBT_AUDITOR_PR_URL": pr_url,
+            "DBT_AUDITOR_SHADOW_MODE": "true",
+            "DBT_AUDITOR_TIMEOUT_SECONDS": "600",
+            "DBT_AUDITOR_MAX_TURNS": "25",
+            "DBT_AUDITOR_MAX_TOOL_CALLS": "50",
+        }
+    )
+    if report_path:
+        env["DBT_AUDITOR_REPORT_PATH"] = str(report_path)
+    return env
+
+
+# Mirrors the DAG invocation layer's allowlist: PATH/HOME for the
+# interpreter and boto3 config, AWS_* for Bedrock/Secrets credentials,
+# CA bundles for TLS interception environments.
+_AMBIENT_PASSTHROUGH_KEYS = (
+    "PATH",
+    "HOME",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION",
+    "AWS_ROLE_ARN",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AWS_STS_REGIONAL_ENDPOINTS",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_PROFILE",
+    "AWS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+)
 
 
 def build_auditor_args(auditor_python: str) -> list:
@@ -183,6 +228,25 @@ def parse_auditor_stdout(stdout: str) -> _ParsedStdout:
         verdict_reason=verdict_match.group("reason").strip() if verdict_match else "",
         check_statuses=check_statuses,
     )
+
+
+# The real rendered report's check sections: "### <Name> (`identifier`)"
+# followed by "**State:** **PASS|FAIL|UNCONFIRMED**" (see
+# dbt_auditor.report.render_report).
+_REPORT_SECTION_RE = re.compile(
+    r"^###\s+.+?\(`(?P<id>[a-z0-9_]+)`\)\s*$(?P<body>.*?)(?=^###\s|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_REPORT_STATE_RE = re.compile(r"\*\*State:\*\*\s*\*\*(?P<state>[A-Z]+)\*\*")
+
+
+def _check_statuses_from_report(report_text: str) -> Dict[str, str]:
+    statuses: Dict[str, str] = {}
+    for match in _REPORT_SECTION_RE.finditer(report_text):
+        state_match = _REPORT_STATE_RE.search(match.group("body"))
+        if state_match is not None:
+            statuses[match.group("id")] = state_match.group("state")
+    return statuses
 
 
 def _check_is_passing(status: str) -> bool:
@@ -255,24 +319,41 @@ def run_reaudit_gate(
                     reason=f"candidate diff could not be applied for re-audit: {exc}",
                 )
 
-            env = build_auditor_env(
-                repo_path=scratch_root,
-                pr_diff=pr_diff,
-                pr_title=pr_title,
-                pr_description=pr_description,
-                pr_url=pr_url,
-            )
-            args = build_auditor_args(auditor_python)
+            import tempfile
 
+            report_fd, report_file = tempfile.mkstemp(suffix=".md", prefix="dbt-reaudit-")
+            os.close(report_fd)
+            report_text = ""
             try:
-                outcome = subprocess_runner(args, env, scratch_root, timeout_seconds)
-            except AuditorInvocationError as exc:
-                return ReAuditVerdict(
-                    passed=False,
-                    hard_no_safe_fix=True,
-                    violation="auditor_interpreter_missing",
-                    reason=f"the sealed auditor could not be invoked: {exc}",
+                env = build_auditor_env(
+                    repo_path=scratch_root,
+                    pr_diff=pr_diff,
+                    pr_title=pr_title,
+                    pr_description=pr_description,
+                    pr_url=pr_url,
+                    report_path=report_file,
                 )
+                args = build_auditor_args(auditor_python)
+
+                try:
+                    outcome = subprocess_runner(args, env, scratch_root, timeout_seconds)
+                except AuditorInvocationError as exc:
+                    return ReAuditVerdict(
+                        passed=False,
+                        hard_no_safe_fix=True,
+                        violation="auditor_interpreter_missing",
+                        reason=f"the sealed auditor could not be invoked: {exc}",
+                    )
+                try:
+                    with open(report_file, "r", encoding="utf-8") as handle:
+                        report_text = handle.read()
+                except OSError:
+                    report_text = ""
+            finally:
+                try:
+                    os.unlink(report_file)
+                except OSError:
+                    pass
     except ScratchCopyError as exc:
         return ReAuditVerdict(
             passed=False,
@@ -291,6 +372,19 @@ def run_reaudit_gate(
         )
 
     parsed = parse_auditor_stdout(outcome.stdout)
+
+    # The real auditor delivers per-check states via the report FILE
+    # (DBT_AUDITOR_REPORT_PATH), not stdout. Prefer it; the stdout block
+    # remains a fallback for fakes/older pins.
+    if report_text:
+        file_statuses = _check_statuses_from_report(report_text)
+        if file_statuses:
+            parsed = _ParsedStdout(
+                status=parsed.status,
+                verdict=parsed.verdict,
+                verdict_reason=parsed.verdict_reason,
+                check_statuses={**file_statuses, **parsed.check_statuses},
+            )
 
     if parsed.status is None or parsed.status.lower() != "completed":
         return ReAuditVerdict(

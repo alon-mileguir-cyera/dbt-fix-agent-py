@@ -325,3 +325,95 @@ def test_status_failed_is_treated_as_a_gate_failure(tmp_path: Path) -> None:
 
     assert not verdict.passed
     assert verdict.violation == "auditor_output_unparsable"
+
+
+# ---------------------------------------------------------------------------
+# live e2e findings (run 8): env passthrough, knobs, report-file handoff
+# ---------------------------------------------------------------------------
+
+
+def test_auditor_env_passes_credentials_knobs_and_report_path(monkeypatch):
+    from dbt_fixer.reaudit import build_auditor_env
+
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/tok")
+    monkeypatch.setenv("NOT_ALLOWED", "nope")
+    env = build_auditor_env(
+        repo_path="/scratch", pr_diff="d", pr_title="t",
+        pr_description="", pr_url="u", report_path="/tmp/r.md",
+    )
+    assert env["AWS_REGION"] == "us-east-1"
+    assert env["AWS_WEB_IDENTITY_TOKEN_FILE"] == "/var/run/tok"
+    assert "NOT_ALLOWED" not in env
+    assert env["DBT_AUDITOR_TIMEOUT_SECONDS"] == "600"
+    assert env["DBT_AUDITOR_MAX_TOOL_CALLS"] == "50"
+    assert env["DBT_AUDITOR_REPORT_PATH"] == "/tmp/r.md"
+    assert "DBT_AUDITOR_SLACK_CHANNEL" not in env
+
+
+def test_check_statuses_parsed_from_real_report_markdown():
+    from dbt_fixer.reaudit import _check_statuses_from_report
+
+    report = (
+        "# Verdict: **PASSED**\n\n"
+        "### Schema Contract Verification (`schema_contract_verification`)\n\n"
+        "**Score:** 90/100 &nbsp;&nbsp; **State:** **PASS**\n\n"
+        "### Tenant Isolation Integrity (`tenant_isolation_integrity`)\n\n"
+        "**Score:** 60/100 &nbsp;&nbsp; **State:** **FAIL**\n"
+    )
+    statuses = _check_statuses_from_report(report)
+    assert statuses == {
+        "schema_contract_verification": "PASS",
+        "tenant_isolation_integrity": "FAIL",
+    }
+
+
+def test_report_file_statuses_satisfy_the_efficacy_requirement(tmp_path):
+    """A fake auditor that writes the real report file (no stdout block)
+    must satisfy the originally-failing-check requirement via the file."""
+    from dbt_fixer.reaudit import run_reaudit_gate
+
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "x.yml").write_text("version: 2\n")
+    diff = (
+        "diff --git a/models/x.yml b/models/x.yml\n"
+        "--- a/models/x.yml\n"
+        "+++ b/models/x.yml\n"
+        "@@ -1 +1,2 @@\n"
+        " version: 2\n"
+        "+# fix\n"
+    )
+
+    def fake_runner(args, env, cwd, timeout_seconds):
+        from dbt_fixer.reaudit import ProcessOutcome
+
+        report_path = env["DBT_AUDITOR_REPORT_PATH"]
+        with open(report_path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "# Verdict: **PASSED**\n\n"
+                "### Schema Contract Verification (`schema_contract_verification`)\n\n"
+                "**Score:** 95/100 &nbsp;&nbsp; **State:** **PASS**\n"
+            )
+        return ProcessOutcome(
+            returncode=0,
+            stdout=(
+                "dbt-auditor verdict: PASSED - all clear\n"
+                "dbt-auditor-audit-status: completed\n"
+            ),
+            stderr="",
+        )
+
+    verdict = run_reaudit_gate(
+        repo_root=tmp_path,
+        candidate_diff=diff,
+        pr_diff="",
+        pr_title="t",
+        pr_description="",
+        pr_url="u",
+        auditor_python="/fake/python",
+        failure_kind="audit",
+        originally_failing_check_ids=("schema_contract_verification",),
+        timeout_seconds=60.0,
+        subprocess_runner=fake_runner,
+    )
+    assert verdict.passed, verdict.reason

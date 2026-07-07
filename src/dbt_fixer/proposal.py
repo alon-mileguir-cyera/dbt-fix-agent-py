@@ -84,6 +84,10 @@ Rules:
 - If you cannot identify a safe, minimal fix, do not guess: answer with an
   empty "edits" list and explain why in "rationale".
 - Do not include any text outside the single JSON object.
+- The edit types (whole_file_replace, line_range_edit, create_file) are
+  JSON shapes in your final answer - they are NOT callable tools. Your only
+  tools are read_repo_file and search_repo_files; never attempt to call
+  anything else.
 - CRITICAL: do not narrate your plan or announce that you are about to
   finalize - the moment you know the fix, STOP calling tools and output
   the JSON object itself. Announcing "I will now create the file" without
