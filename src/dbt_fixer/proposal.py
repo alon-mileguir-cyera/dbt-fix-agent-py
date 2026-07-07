@@ -84,6 +84,26 @@ Rules:
 - If you cannot identify a safe, minimal fix, do not guess: answer with an
   empty "edits" list and explain why in "rationale".
 - Do not include any text outside the single JSON object.
+- CRITICAL: do not narrate your plan or announce that you are about to
+  finalize - the moment you know the fix, STOP calling tools and output
+  the JSON object itself. Announcing "I will now create the file" without
+  emitting the JSON is a failed run. You have a hard tool budget; spend it
+  on at most a few verifications, never on re-confirming what the
+  pre-loaded files already show.
+"""
+
+# When the model narrates its way to the tool cap without ever emitting the
+# JSON (observed live: repeated "I'll now finalize" with more tool calls),
+# one bounded, tool-free finalization nudge converts the stall into an
+# answer. The prior narration is included so a fresh-context call can still
+# finalize from the analysis already done.
+FINALIZATION_INSTRUCTIONS = """Your previous response analyzed the failure and described a fix, but never
+emitted the required JSON object. Based ONLY on the analysis below, output
+the single JSON object now, in exactly the schema you were given (edits +
+rationale). No tool calls, no prose, no markdown outside the JSON.
+
+## Your previous analysis
+
 """
 
 
@@ -391,6 +411,33 @@ def run_proposal_pass(
 
     raw_text = raw if isinstance(raw, str) else None
     proposal = parse_proposal(raw)
+
+    if proposal is None and raw_text and parse_declination(raw_text) is None:
+        # Finalization fallback: narration without JSON. One more bounded,
+        # tool-free nudge; a second miss falls through to the normal
+        # fail-closed path.
+        try:
+            budget.record_turn()
+            retry_prompt = FINALIZATION_INSTRUCTIONS + raw_text[-6000:]
+            raw_retry = runner(retry_prompt)
+            retry_proposal = parse_proposal(raw_retry)
+            if retry_proposal is not None:
+                return ProposalPassResult(
+                    proposal=retry_proposal, no_proposal_reason=None, raw_output=raw_retry
+                )
+            retry_declination = parse_declination(raw_retry)
+            if retry_declination is not None:
+                return ProposalPassResult(
+                    proposal=None,
+                    no_proposal_reason=f"model found no safe fix: {retry_declination}",
+                    raw_output=raw_retry,
+                )
+            raw_text = raw_retry if isinstance(raw_retry, str) else raw_text
+        except BoundedExecutionError:
+            pass  # budget exhausted - fall through to the honest failure below
+        except Exception:  # noqa: BLE001 - the runner is an untrusted boundary
+            pass
+
     if proposal is None:
         declination = parse_declination(raw_text)
         if declination is None:

@@ -361,7 +361,9 @@ def test_run_proposal_pass_records_a_turn_before_calling_runner() -> None:
 
     run_proposal_pass(lambda prompt: "{}", "prompt", budget)
 
-    assert budget.turns_used == 1
+    # "{}" is neither a proposal nor a declination, so the finalization
+    # fallback legitimately consumes a second turn.
+    assert budget.turns_used == 2
 
 
 # ---------------------------------------------------------------------------
@@ -456,3 +458,80 @@ def test_declination_is_detected_with_rationale():
     assert parse_declination(raw) == "fix requires creating a file type I cannot"
     assert parse_declination('{"edits": [{"type": "x"}], "rationale": "r"}') is None
     assert parse_declination("not json") is None
+
+
+# ---------------------------------------------------------------------------
+# finalization fallback (narration-without-JSON stall, observed live)
+# ---------------------------------------------------------------------------
+
+
+def _budget():
+    from dbt_fixer.bounds import Bounds, ExecutionBudget
+    return ExecutionBudget(Bounds(timeout_seconds=60.0, max_tool_calls=10, max_turns=5))
+
+
+def test_narration_then_json_is_rescued_by_the_fallback():
+    from dbt_fixer.proposal import run_proposal_pass
+
+    calls = []
+    def runner(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return "I have gathered enough information. I'll now finalize the fix."
+        return _proposal_json([
+            {"type": "create_file", "path": "models/staging/_m.yml", "content": "version: 2\n"}
+        ])
+
+    result = run_proposal_pass(runner, "p", _budget())
+    assert result.ok and result.proposal.edits[0].kind == "create_file"
+    assert len(calls) == 2
+    assert "previous response analyzed" in calls[1]
+    assert "I'll now finalize" in calls[1]  # prior analysis included
+
+
+def test_narration_twice_fails_honestly():
+    from dbt_fixer.proposal import run_proposal_pass
+
+    result = run_proposal_pass(lambda p: "still just narrating...", "p", _budget())
+    assert not result.ok
+    assert "did not match" in result.no_proposal_reason
+
+
+def test_fallback_declination_is_surfaced():
+    from dbt_fixer.proposal import run_proposal_pass
+
+    calls = []
+    def runner(prompt):
+        calls.append(prompt)
+        if len(calls) == 1:
+            return "narration without json"
+        return '{"edits": [], "rationale": "no safe fix exists"}'
+
+    result = run_proposal_pass(runner, "p", _budget())
+    assert not result.ok
+    assert "no safe fix exists" in result.no_proposal_reason
+
+
+def test_direct_declination_skips_the_fallback():
+    from dbt_fixer.proposal import run_proposal_pass
+
+    calls = []
+    def runner(prompt):
+        calls.append(prompt)
+        return '{"edits": [], "rationale": "cannot fix safely"}'
+
+    result = run_proposal_pass(runner, "p", _budget())
+    assert not result.ok
+    assert "cannot fix safely" in result.no_proposal_reason
+    assert len(calls) == 1  # no second call for an honest declination
+
+
+def test_exhausted_budget_blocks_the_fallback():
+    from dbt_fixer.bounds import Bounds, ExecutionBudget
+    from dbt_fixer.proposal import run_proposal_pass
+
+    budget = ExecutionBudget(Bounds(timeout_seconds=60.0, max_tool_calls=10, max_turns=1))
+    calls = []
+    result = run_proposal_pass(lambda p: calls.append(p) or "narration", "p", budget)
+    assert not result.ok
+    assert len(calls) == 1  # turn cap exhausted -> no fallback call
