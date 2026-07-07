@@ -136,6 +136,34 @@ def test_summary_includes_pr_url_line_when_provided():
     assert "*PR:*" in summary_text
 
 
+def test_summary_field_order_is_glyph_pr_failure_kind_reason_gates():
+    """Spec's fixed shape: status glyph, PR link, failure kind, reason, then
+    the gate scoreboard -- in that order, every time, for every status."""
+
+    for status in ("proposed", "no_safe_fix", "failed"):
+        client = _FakeSlackClient()
+        run_result = _run_result(status=status)
+        deliver_shadow_report(
+            run_result=run_result,
+            failure_kind="ci",
+            pr_url="https://github.com/cyeragit/bi-dbt/pull/2497",
+            channel="#chan",
+            token="xoxb-test",
+            client_factory=lambda t, c=client: c,
+        )
+        summary_text = _summary_call(client)["text"]
+
+        glyph_index = summary_text.index(run_result.glyph())
+        pr_index = summary_text.index("*PR:*")
+        failure_kind_index = summary_text.index("*Failure kind:*")
+        reason_index = summary_text.index(run_result.reason)
+        gates_index = summary_text.index("*Gates:*")
+
+        assert glyph_index < pr_index < failure_kind_index < reason_index < gates_index, (
+            f"summary field order violated for status={status!r}: {summary_text!r}"
+        )
+
+
 def test_summary_omits_pr_line_when_url_absent():
     client = _FakeSlackClient()
     deliver_shadow_report(

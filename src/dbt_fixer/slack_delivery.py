@@ -123,8 +123,8 @@ def _build_summary_text(run_result: RunResult, *, failure_kind: str, pr_url: str
     )
     return (
         f"{glyph} *Status:* `{run_result.status}`\n"
-        f"*Failure kind:* `{failure_kind}`\n"
         f"{pr_line}"
+        f"*Failure kind:* `{failure_kind}`\n"
         f"{reason}\n"
         f"*Gates:* {scoreboard}\n"
         "\U0001f9f5 Full diff and gate detail posted as threaded replies below."
