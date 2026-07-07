@@ -12,24 +12,93 @@ and there never will be: structured file changes only ever happen through
 has direct tool access to. This asymmetry -- read/search tools for the
 model, a separate, non-model-invoked applier for writes -- is the whole
 point of this module.
+
+**Two call shapes.** `read_file`/`search_files` raise a typed exception on
+every rejection (path escape, missing file, wrong type) -- convenient for
+callers that have no recovery path other than aborting. `try_read_file`/
+`try_search_files` are the non-raising counterparts: they return a closed
+`RepoReadOutcome`/`RepoSearchOutcome` enum plus a human-readable reason,
+never an exception, and are what the model-facing agno tool wiring
+(`dbt_fixer.agent.build_repo_toolkit`) uses -- a model tool call should never
+propagate a raw Python exception back through the agent framework.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
-from ..pathsafe import PathTraversalError, resolve_within_root
+from ..pathsafe import PathTraversalError, check_within_root, resolve_within_root
 
 __all__ = [
     "PathTraversalError",
     "RepoFileNotFoundError",
     "RepoIsADirectoryError",
     "RepoTools",
+    "RepoReadOutcome",
+    "RepoReadResult",
+    "RepoSearchOutcome",
+    "RepoSearchResult",
 ]
 
 DEFAULT_MAX_READ_BYTES = 1_000_000
 DEFAULT_MAX_SEARCH_RESULTS = 500
+
+
+class RepoReadOutcome(Enum):
+    """The closed set of results `RepoTools.try_read_file` can produce."""
+
+    OK = "ok"
+    PATH_REJECTED = "path_rejected"
+    NOT_FOUND = "not_found"
+    IS_A_DIRECTORY = "is_a_directory"
+    ERROR = "error"
+
+    @property
+    def ok(self) -> bool:
+        return self is RepoReadOutcome.OK
+
+
+@dataclass(frozen=True)
+class RepoReadResult:
+    """The non-exceptional result of one `try_read_file` call."""
+
+    outcome: RepoReadOutcome
+    content: Optional[str] = None
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome.ok
+
+
+class RepoSearchOutcome(Enum):
+    """The closed set of results `RepoTools.try_search_files` can produce."""
+
+    OK = "ok"
+    PATH_REJECTED = "path_rejected"
+    NOT_FOUND = "not_found"
+    NOT_A_DIRECTORY = "not_a_directory"
+    ERROR = "error"
+
+    @property
+    def ok(self) -> bool:
+        return self is RepoSearchOutcome.OK
+
+
+@dataclass(frozen=True)
+class RepoSearchResult:
+    """The non-exceptional result of one `try_search_files` call."""
+
+    outcome: RepoSearchOutcome
+    matches: Tuple[str, ...] = ()
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome.ok
 
 
 class RepoFileNotFoundError(FileNotFoundError):
@@ -173,6 +242,103 @@ class RepoTools:
                 break
 
         return tuple(sorted(set(matches)))
+
+    def try_read_file(
+        self, relative_path: str, max_bytes: int = DEFAULT_MAX_READ_BYTES
+    ) -> RepoReadResult:
+        """Non-raising counterpart to `read_file`.
+
+        Never raises: every rejection this method's underlying checks can
+        produce (path escape, missing file, path-is-a-directory, or a
+        genuinely unexpected filesystem error) is converted into a typed
+        `RepoReadResult` with a specific `reason`, never an exception. This
+        is the shape the model-facing toolkit (`dbt_fixer.agent`) uses.
+        """
+
+        check = check_within_root(self._root, relative_path)
+        if not check.ok:
+            return RepoReadResult(outcome=RepoReadOutcome.PATH_REJECTED, reason=check.reason)
+
+        resolved = check.resolved_path
+        assert resolved is not None  # guaranteed by check.ok
+
+        if not resolved.exists():
+            return RepoReadResult(
+                outcome=RepoReadOutcome.NOT_FOUND, reason=f"no such file: {relative_path!r}"
+            )
+        if resolved.is_dir():
+            return RepoReadResult(
+                outcome=RepoReadOutcome.IS_A_DIRECTORY,
+                reason=f"path is a directory, not a file: {relative_path!r}",
+            )
+
+        try:
+            with resolved.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+                content = handle.read(max_bytes)
+        except OSError as exc:
+            return RepoReadResult(
+                outcome=RepoReadOutcome.ERROR,
+                reason=f"could not read {relative_path!r}: {type(exc).__name__}: {exc}",
+            )
+
+        return RepoReadResult(outcome=RepoReadOutcome.OK, content=content)
+
+    def try_search_files(
+        self,
+        pattern: str,
+        relative_dir: str = ".",
+        max_results: int = DEFAULT_MAX_SEARCH_RESULTS,
+    ) -> RepoSearchResult:
+        """Non-raising counterpart to `search_files`.
+
+        Never raises: every rejection (path escape, missing/non-directory
+        `relative_dir`, or an unexpected filesystem error) is converted
+        into a typed `RepoSearchResult`, never an exception. This is the
+        shape the model-facing toolkit (`dbt_fixer.agent`) uses.
+        """
+
+        dir_check = check_within_root(self._root, relative_dir)
+        if not dir_check.ok:
+            return RepoSearchResult(outcome=RepoSearchOutcome.PATH_REJECTED, reason=dir_check.reason)
+
+        base = dir_check.resolved_path
+        assert base is not None  # guaranteed by dir_check.ok
+
+        if not base.exists():
+            return RepoSearchResult(
+                outcome=RepoSearchOutcome.NOT_FOUND, reason=f"no such directory: {relative_dir!r}"
+            )
+        if not base.is_dir():
+            return RepoSearchResult(
+                outcome=RepoSearchOutcome.NOT_A_DIRECTORY, reason=f"not a directory: {relative_dir!r}"
+            )
+
+        if not isinstance(pattern, str) or pattern.strip() == "":
+            return RepoSearchResult(
+                outcome=RepoSearchOutcome.PATH_REJECTED,
+                reason=f"pattern must be a non-empty string, got {pattern!r}",
+            )
+        pattern_candidate = Path(pattern)
+        if pattern_candidate.is_absolute():
+            return RepoSearchResult(
+                outcome=RepoSearchOutcome.PATH_REJECTED,
+                reason=f"absolute glob patterns are not allowed: {pattern!r}",
+            )
+        if ".." in pattern_candidate.parts:
+            return RepoSearchResult(
+                outcome=RepoSearchOutcome.PATH_REJECTED,
+                reason=f"glob patterns may not contain '..': {pattern!r}",
+            )
+
+        try:
+            matches = self.search_files(pattern, relative_dir, max_results)
+        except (PathTraversalError, RepoFileNotFoundError, NotADirectoryError) as exc:
+            # Unreachable in practice given the checks above, but kept as a
+            # fail-closed backstop rather than letting a rule added later to
+            # `search_files` silently bypass this non-raising surface.
+            return RepoSearchResult(outcome=RepoSearchOutcome.ERROR, reason=str(exc))
+
+        return RepoSearchResult(outcome=RepoSearchOutcome.OK, matches=matches)
 
 
 def _validate_pattern(pattern: str) -> None:

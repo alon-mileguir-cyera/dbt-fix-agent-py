@@ -81,11 +81,20 @@ def build_repo_toolkit(repo_tools: RepoTools, *, budget: Optional[ExecutionBudge
             relative_path: Path relative to the repository root, e.g.
                 `"models/staging/stg_customers.sql"`. Absolute paths and
                 `..` traversal are rejected.
+
+        Never raises back into the agent framework: a rejected path or a
+        missing/unreadable file returns a short, clearly-labeled error
+        string (via the non-raising `RepoTools.try_read_file`) for the
+        model to read as a normal tool result, not an exception a tool-call
+        loop might handle unpredictably.
         """
 
         if budget is not None:
             budget.record_tool_call()
-        return repo_tools.read_file(relative_path)
+        result = repo_tools.try_read_file(relative_path)
+        if not result.ok:
+            return f"error: {result.reason}"
+        return result.content or ""
 
     def search_repo_files(pattern: str, relative_dir: str = ".") -> list[str]:
         """Search for files in the repository under review by glob pattern.
@@ -94,11 +103,19 @@ def build_repo_toolkit(repo_tools: RepoTools, *, budget: Optional[ExecutionBudge
             pattern: A glob pattern, e.g. `"*.sql"` or `"models/**/*.sql"`.
             relative_dir: Directory (relative to the repository root) to
                 search under. Defaults to the repository root itself.
+
+        Never raises back into the agent framework: a rejected pattern/dir
+        returns a single-element list carrying a clearly-labeled error
+        string (via the non-raising `RepoTools.try_search_files`), never an
+        exception.
         """
 
         if budget is not None:
             budget.record_tool_call()
-        return list(repo_tools.search_files(pattern, relative_dir))
+        result = repo_tools.try_search_files(pattern, relative_dir)
+        if not result.ok:
+            return [f"error: {result.reason}"]
+        return list(result.matches)
 
     return Toolkit(name="repo_tools", tools=[read_repo_file, search_repo_files])
 

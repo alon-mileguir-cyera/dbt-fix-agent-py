@@ -57,6 +57,35 @@ def test_toolkit_entrypoints_delegate_to_repo_tools_read_and_search(tmp_path: Pa
     assert search_fn("**/*.sql", "models") == ["models/a.sql"]
 
 
+def test_toolkit_read_tool_never_raises_for_a_path_escape_attempt(tmp_path: Path) -> None:
+    """A model-controlled path escape attempt must surface as a normal
+    (error-labeled) tool result, never an exception the agent framework's
+    tool-call loop would have to handle."""
+
+    root = _make_repo(tmp_path)
+    repo_tools = RepoTools(root)
+    toolkit = build_repo_toolkit(repo_tools)
+    read_fn = toolkit.functions["read_repo_file"].entrypoint
+
+    result = read_fn("../outside.txt")
+
+    assert isinstance(result, str)
+    assert result.startswith("error:")
+
+
+def test_toolkit_search_tool_never_raises_for_a_path_escape_attempt(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    repo_tools = RepoTools(root)
+    toolkit = build_repo_toolkit(repo_tools)
+    search_fn = toolkit.functions["search_repo_files"].entrypoint
+
+    result = search_fn("*.sql", "/etc")
+
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert result[0].startswith("error:")
+
+
 def test_toolkit_tool_calls_are_bounded_by_execution_budget(tmp_path: Path) -> None:
     root = _make_repo(tmp_path)
     repo_tools = RepoTools(root)

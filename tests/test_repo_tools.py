@@ -18,6 +18,8 @@ from dbt_fixer.pathsafe import PathTraversalError
 from dbt_fixer.tools.repo_tools import (
     RepoFileNotFoundError,
     RepoIsADirectoryError,
+    RepoReadOutcome,
+    RepoSearchOutcome,
     RepoTools,
 )
 
@@ -181,3 +183,145 @@ def test_search_files_respects_max_results_cap(tmp_path: Path) -> None:
     matches = tools.search_files("**/*.sql", relative_dir="models", max_results=1)
 
     assert len(matches) == 1
+
+
+# --- try_read_file / try_search_files: the non-raising Outcome-enum API ----
+
+
+def test_try_read_file_ok(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_read_file("models/staging/stg_customers.sql")
+
+    assert result.ok is True
+    assert result.outcome is RepoReadOutcome.OK
+    assert result.content == "select * from raw.customers"
+    assert result.reason == ""
+
+
+def test_try_read_file_never_raises_for_traversal(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_read_file("../etc/passwd")
+
+    assert result.ok is False
+    assert result.outcome is RepoReadOutcome.PATH_REJECTED
+    assert result.content is None
+    assert result.reason
+
+
+def test_try_read_file_never_raises_for_absolute_path(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_read_file("/etc/passwd")
+
+    assert result.ok is False
+    assert result.outcome is RepoReadOutcome.PATH_REJECTED
+
+
+def test_try_read_file_never_raises_for_missing_file(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_read_file("models/does_not_exist.sql")
+
+    assert result.ok is False
+    assert result.outcome is RepoReadOutcome.NOT_FOUND
+    assert result.reason
+
+
+def test_try_read_file_never_raises_for_directory(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_read_file("models/staging")
+
+    assert result.ok is False
+    assert result.outcome is RepoReadOutcome.IS_A_DIRECTORY
+    assert result.reason
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks require elevated privileges on Windows")
+def test_try_read_file_never_raises_for_symlink_escape(tmp_path: Path) -> None:
+    outside = tmp_path / "outside_secret2.sql"
+    outside.write_text("select secret", encoding="utf-8")
+    root = _make_repo(tmp_path)
+    (root / "models" / "escape2.sql").symlink_to(outside)
+    tools = RepoTools(root)
+
+    result = tools.try_read_file("models/escape2.sql")
+
+    assert result.ok is False
+    assert result.outcome is RepoReadOutcome.PATH_REJECTED
+
+
+def test_try_search_files_ok(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_search_files("**/*.sql", relative_dir="models")
+
+    assert result.ok is True
+    assert result.outcome is RepoSearchOutcome.OK
+    assert result.matches == (
+        "models/marts/customers.sql",
+        "models/staging/stg_customers.sql",
+    )
+    assert result.reason == ""
+
+
+def test_try_search_files_never_raises_for_traversal_in_relative_dir(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_search_files("*.sql", relative_dir="../etc")
+
+    assert result.ok is False
+    assert result.outcome is RepoSearchOutcome.PATH_REJECTED
+    assert result.matches == ()
+    assert result.reason
+
+
+def test_try_search_files_never_raises_for_absolute_relative_dir(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_search_files("*.sql", relative_dir="/etc")
+
+    assert result.ok is False
+    assert result.outcome is RepoSearchOutcome.PATH_REJECTED
+
+
+def test_try_search_files_never_raises_for_missing_relative_dir(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_search_files("*.sql", relative_dir="does-not-exist")
+
+    assert result.ok is False
+    assert result.outcome is RepoSearchOutcome.NOT_FOUND
+    assert result.reason
+
+
+def test_try_search_files_never_raises_for_non_directory_relative_dir(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    result = tools.try_search_files("*.sql", relative_dir="models/staging/stg_customers.sql")
+
+    assert result.ok is False
+    assert result.outcome is RepoSearchOutcome.NOT_A_DIRECTORY
+
+
+def test_try_search_files_and_search_files_agree_on_matches(tmp_path: Path) -> None:
+    root = _make_repo(tmp_path)
+    tools = RepoTools(root)
+
+    raising = tools.search_files("**/*.sql", relative_dir="models")
+    non_raising = tools.try_search_files("**/*.sql", relative_dir="models")
+
+    assert non_raising.ok is True
+    assert non_raising.matches == raising
