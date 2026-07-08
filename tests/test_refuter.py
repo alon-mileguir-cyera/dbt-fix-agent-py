@@ -259,10 +259,17 @@ def test_prompt_contains_fenced_failure_context_and_fenced_candidate_diff():
     candidate_diff = "--- a/models/a.sql\n+++ b/models/a.sql\n+select 1\n"
     prompt = build_refuter_prompt(fenced, candidate_diff)
 
-    assert fenced.render() in prompt
+    # Content-isolation (injection #1): the refuter gets ONLY the failure
+    # context + the candidate diff - never the author's free-form prose.
+    assert f"<<<UNTRUSTED:failure_context:{fenced.nonce}>>>" in prompt
+    assert "not_null_a_id" in prompt
     assert f"<<<UNTRUSTED:candidate_diff:{fenced.nonce}>>>" in prompt
     assert candidate_diff in prompt
     assert f"<<<END_UNTRUSTED:candidate_diff:{fenced.nonce}>>>" in prompt
+    # author-controlled prose must NOT reach the refuter
+    assert "Fix broken not_null test" not in prompt  # pr_title
+    assert "restores a deleted line" not in prompt    # pr_description
+    assert "github.com/example/repo/pull/1" not in prompt  # pr_url
 
 
 def test_prompt_is_freshly_built_each_call_with_no_carried_state():
@@ -292,7 +299,8 @@ def test_gate_invokes_runner_with_the_freshly_built_prompt():
         timeout_seconds=5.0,
     )
     assert candidate_diff in captured["prompt"]
-    assert fenced.render() in captured["prompt"]
+    assert "not_null_a_id" in captured["prompt"]  # failure_context present
+    assert "Fix broken not_null test" not in captured["prompt"]  # pr_title absent
 
 
 # ---------------------------------------------------------------------------

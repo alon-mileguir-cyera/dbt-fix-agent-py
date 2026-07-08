@@ -499,3 +499,35 @@ def test_move_exemption_is_count_bounded(tmp_path):
         failure_kind="audit", caps=DEFAULT_CAPS,
     )
     assert not verdict.passed
+
+
+def test_relocating_a_test_to_a_different_persisting_column_is_rejected(tmp_path):
+    """Red-team finding 2: removing `- unique` from a column that PERSISTS
+    and re-adding it under a different column is weakening, not a move -
+    must be rejected under both kinds."""
+    repo = _make_repo(tmp_path, {
+        "proj/models/staging/_x__models.yml": (
+            "version: 2\nmodels:\n  - name: m\n    columns:\n"
+            "      - name: tenant_id\n        tests:\n          - not_null\n          - unique\n"
+            "      - name: created_at\n        tests:\n          - not_null\n"
+        ),
+    })
+    diff = (
+        "diff --git a/proj/models/staging/_x__models.yml b/proj/models/staging/_x__models.yml\n"
+        "--- a/proj/models/staging/_x__models.yml\n"
+        "+++ b/proj/models/staging/_x__models.yml\n"
+        "@@ -5,7 +5,7 @@\n"
+        "       - name: tenant_id\n"
+        "         tests:\n"
+        "           - not_null\n"
+        "-          - unique\n"
+        "       - name: created_at\n"
+        "         tests:\n"
+        "           - not_null\n"
+        "+          - unique\n"
+    )
+    for kind in ("audit", "ci"):
+        v = run_allowlist_gate(repo_root=repo, candidate_diff=diff, pr_diff="",
+                               failure_kind=kind, caps=DEFAULT_CAPS)
+        assert not v.passed, f"kind={kind}: relocation to a persisting column must be rejected"
+

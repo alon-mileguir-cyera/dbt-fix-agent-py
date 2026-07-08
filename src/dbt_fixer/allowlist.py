@@ -220,6 +220,36 @@ def _check_restore_only_sql_deletions(
     return None
 
 
+_COLUMN_NAME_RE = re.compile(r"^\s*-\s*name\s*:", re.IGNORECASE)
+
+
+def _restructure_exempt_removed_tests(block: FileDiffBlock) -> Counter:
+    """Removed test lines that belong to a column whose OWN `- name:` line is
+    also removed - i.e. the column is being renamed/restructured, the only
+    case where a test legitimately "moves" (bi-dbt #2533 round 4). A test
+    removed from a column that PERSISTS (its `- name:` unchanged) is genuine
+    weakening and is NEVER exempt (red-team finding 2: relocating a
+    sensitive column's test under a throwaway column defeated the file-wide
+    Counter). Walks the OLD side (removed + context lines) tracking whether
+    the current column header was removed."""
+    exempt: Counter = Counter()
+    for hunk in block.hunks:
+        current_col_removed = False
+        for line in hunk.lines:
+            if line.kind == "added":
+                continue  # old-side walk only
+            if _COLUMN_NAME_RE.match(line.text):
+                current_col_removed = line.kind == "removed"
+                continue
+            if (
+                line.kind == "removed"
+                and current_col_removed
+                and _is_test_related_removed_line(line.text.rstrip("\n")) is not None
+            ):
+                exempt[line.text.strip()] += 1
+    return exempt
+
+
 def _check_test_weakening(
     blocks: Tuple[FileDiffBlock, ...],
     failure_kind: FailureKind,
@@ -229,19 +259,22 @@ def _check_test_weakening(
         suffix = Path(block.path).suffix.lower()
         if suffix not in (".yml", ".yaml"):
             continue
-        # A removed test line that is re-added VERBATIM (modulo whitespace)
-        # in the same file is a MOVE - the column-rename fix shape (live
-        # finding, bi-dbt #2533 round 4: renaming a mis-declared column
-        # re-lists its identical tests under the new name and was rejected
-        # as a deletion). Only NET removals are weakening; whether the move
-        # itself is sound stays the re-audit's and refuter's call.
+        # A removed test line is a legitimate MOVE only when (a) its owning
+        # column is itself being removed/renamed AND (b) the identical test
+        # line is re-added elsewhere in the file - the column-rename fix
+        # shape (bi-dbt #2533 round 4). A test stripped from a column that
+        # persists is weakening even if an identical string reappears under a
+        # different column (red-team finding 2), so the exemption is scoped
+        # to restructure-removed columns, not the whole file.
         readded = Counter(line.strip() for line in block.added_lines())
+        restructure_exempt = _restructure_exempt_removed_tests(block)
         for removed_line in block.removed_lines():
             test_desc = _is_test_related_removed_line(removed_line)
             if test_desc is None:
                 continue
             normalized = removed_line.strip()
-            if readded[normalized] > 0:
+            if restructure_exempt[normalized] > 0 and readded[normalized] > 0:
+                restructure_exempt[normalized] -= 1
                 readded[normalized] -= 1
                 continue
 

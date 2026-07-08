@@ -19,7 +19,6 @@ from dbt_fixer.applier import (
     EditTargetIsDirectoryError,
     EditTargetNotFoundError,
     AnchorMismatchError,
-    InvalidLineRangeError,
     apply_proposal,
 )
 from dbt_fixer.pathsafe import PathTraversalError
@@ -384,3 +383,18 @@ def test_ambiguous_expected_is_rejected_not_misapplied(tmp_path: Path) -> None:
     with pytest.raises(AnchorMismatchError):
         apply_proposal(root, _proposal(edit))
     assert (root / "m" / "d.sql").read_text(encoding="utf-8") == "x\nx\ny\n"
+
+
+def test_line_range_replacement_without_newline_does_not_fuse_next_line(tmp_path):
+    """Red-team finding 3: a replacement lacking a trailing newline, when not
+    replacing the final line, must not merge into the following line."""
+    root = tmp_path / "scratch"
+    (root / "m").mkdir(parents=True)
+    (root / "m" / "q.sql").write_text("select\n  a,\n  b\nfrom t\n", encoding="utf-8")
+    edit = Edit(
+        kind="line_range_edit", path="m/q.sql", start_line=2, end_line=2,
+        expected="  a,\n", replacement="  a2,",  # no trailing newline
+    )
+    apply_proposal(root, _proposal(edit))
+    out = (root / "m" / "q.sql").read_text(encoding="utf-8")
+    assert out == "select\n  a2,\n  b\nfrom t\n", repr(out)  # not '  a2,  b'

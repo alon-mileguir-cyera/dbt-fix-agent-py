@@ -660,3 +660,88 @@ def test_reaudit_passes_when_fix_fully_reverts_the_pr(tmp_path):
     assert verdict.passed, verdict.reason
     assert "reverts" in verdict.reason
     assert called["n"] == 0  # auditor never invoked on an empty effective diff
+
+
+# --- red-team A: UNCONFIRMED originally-failing check must NOT count as pass ---
+def test_reaudit_rejects_unconfirmed_originally_failing_check(tmp_path):
+    from dbt_fixer.reaudit import run_reaudit_gate, ProcessOutcome
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "x.yml").write_text("version: 2\n")
+    candidate = (
+        "diff --git a/models/x.yml b/models/x.yml\n--- a/models/x.yml\n+++ b/models/x.yml\n"
+        "@@ -1 +1,2 @@\n version: 2\n+# fix\n"
+    )
+    def runner(args, env, cwd, timeout_seconds):
+        rp = env["DBT_AUDITOR_REPORT_PATH"]
+        with open(rp, "w", encoding="utf-8") as h:
+            h.write(
+                "# Verdict: **NEEDS_REVIEW**\n\n"
+                "### Schema Contract Verification (`schema_contract_verification`)\n\n"
+                "**Severity:** Critical &nbsp; **State:** **UNCONFIRMED**\n"
+            )
+        return ProcessOutcome(returncode=0,
+            stdout="dbt-auditor verdict: NEEDS_REVIEW - x\ndbt-auditor-audit-status: completed\n", stderr="")
+    v = run_reaudit_gate(repo_root=tmp_path, candidate_diff=candidate, pr_diff="",
+        pr_title="t", pr_description="", pr_url="u", auditor_python="/fake/py",
+        failure_kind="audit", originally_failing_check_ids=("schema_contract_verification",),
+        timeout_seconds=60.0, subprocess_runner=runner)
+    assert not v.passed
+    assert v.violation == "auditor_check_still_failing"
+
+
+# --- red-team B: a NEW non-advisory check failing must reject even if verdict != BLOCKED ---
+def test_reaudit_rejects_newly_regressed_critical_check(tmp_path):
+    from dbt_fixer.reaudit import run_reaudit_gate, ProcessOutcome
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "x.yml").write_text("version: 2\n")
+    candidate = (
+        "diff --git a/models/x.yml b/models/x.yml\n--- a/models/x.yml\n+++ b/models/x.yml\n"
+        "@@ -1 +1,2 @@\n version: 2\n+# fix\n"
+    )
+    def runner(args, env, cwd, timeout_seconds):
+        rp = env["DBT_AUDITOR_REPORT_PATH"]
+        with open(rp, "w", encoding="utf-8") as h:
+            h.write(
+                "# Verdict: **NEEDS_REVIEW**\n\n"
+                "### Schema Contract Verification (`schema_contract_verification`)\n\n"
+                "**Severity:** Critical &nbsp; **State:** **PASS**\n\n"
+                "### Tenant Isolation Integrity (`tenant_isolation_integrity`)\n\n"
+                "**Severity:** Critical &nbsp; **State:** **FAIL**\n"
+            )
+        return ProcessOutcome(returncode=0,
+            stdout="dbt-auditor verdict: NEEDS_REVIEW - x\ndbt-auditor-audit-status: completed\n", stderr="")
+    v = run_reaudit_gate(repo_root=tmp_path, candidate_diff=candidate, pr_diff="",
+        pr_title="t", pr_description="", pr_url="u", auditor_python="/fake/py",
+        failure_kind="audit", originally_failing_check_ids=("schema_contract_verification",),
+        timeout_seconds=60.0, subprocess_runner=runner)
+    assert not v.passed
+    assert v.violation == "auditor_check_regressed"
+    assert "tenant_isolation_integrity" in v.reason
+
+
+def test_reaudit_advisory_failing_still_passes(tmp_path):
+    """An advisory check failing (sql_style) must NOT block the gate."""
+    from dbt_fixer.reaudit import run_reaudit_gate, ProcessOutcome
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "x.yml").write_text("version: 2\n")
+    candidate = (
+        "diff --git a/models/x.yml b/models/x.yml\n--- a/models/x.yml\n+++ b/models/x.yml\n"
+        "@@ -1 +1,2 @@\n version: 2\n+# fix\n"
+    )
+    def runner(args, env, cwd, timeout_seconds):
+        rp = env["DBT_AUDITOR_REPORT_PATH"]
+        with open(rp, "w", encoding="utf-8") as h:
+            h.write(
+                "# Verdict: **NEEDS_REVIEW**\n\n"
+                "### Schema Contract Verification (`schema_contract_verification`)\n\n"
+                "**Severity:** Critical &nbsp; **State:** **PASS**\n\n"
+                "### SQL Style and Testability (`sql_style_and_testability`)\n\n"
+                "**Severity:** Advisory &nbsp; **State:** **FAIL**\n"
+            )
+        return ProcessOutcome(returncode=0,
+            stdout="dbt-auditor verdict: NEEDS_REVIEW - x\ndbt-auditor-audit-status: completed\n", stderr="")
+    v = run_reaudit_gate(repo_root=tmp_path, candidate_diff=candidate, pr_diff="",
+        pr_title="t", pr_description="", pr_url="u", auditor_python="/fake/py",
+        failure_kind="audit", originally_failing_check_ids=("schema_contract_verification",),
+        timeout_seconds=60.0, subprocess_runner=runner)
+    assert v.passed, v.reason

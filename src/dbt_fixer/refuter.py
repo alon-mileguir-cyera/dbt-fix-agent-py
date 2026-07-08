@@ -60,7 +60,7 @@ process/interpreter exit).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from .bounds import run_with_hard_timeout
 from .fencing import FencedContext, fence_field
@@ -174,6 +174,10 @@ class RefuterVerdict:
     raw_output: Optional[str] = None
 
 
+# The only fenced field the refuter is given (see build_refuter_prompt).
+_REFUTER_CONTEXT_FIELDS: Tuple[str, ...] = ("failure_context",)
+
+
 def build_refuter_prompt(fenced_context: FencedContext, candidate_diff: str) -> str:
     """Build the full prompt for one fix-refuter pass.
 
@@ -191,7 +195,15 @@ def build_refuter_prompt(fenced_context: FencedContext, candidate_diff: str) -> 
     diff_block = fence_field("candidate_diff", candidate_diff, fenced_context.nonce)
     parts = [
         REFUTER_INSTRUCTIONS.strip(),
-        fenced_context.render(),
+        # Content-isolation (red-team injection finding #1): the refuter only
+        # needs the FAILURE CONTEXT + the candidate diff to judge whether the
+        # fix resolves the named failure minimally. It does NOT need the
+        # author's free-form pr_title/pr_description/pr_url (or the original
+        # pr_diff) - feeding those would place the same attacker-controlled
+        # prose in BOTH the proposal and the adversarial checker, so a single
+        # injection could steer both in a correlated way. Restrict to
+        # failure_context so the refuter is a genuinely independent check.
+        fenced_context.render(order=_REFUTER_CONTEXT_FIELDS),
         diff_block.rendered,
     ]
     return "\n\n".join(parts)
@@ -315,7 +327,8 @@ def run_fix_refuter_gate(
         # clean, unambiguous could_not_refute below lets the candidate pass.
         fkind, fvalue = _call_with_timeout(
             refuter_runner,
-            REFUTER_FINALIZATION_INSTRUCTIONS + raw_text[-6000:],
+            REFUTER_FINALIZATION_INSTRUCTIONS
+            + fence_field("prior_response", raw_text[-6000:], fenced_context.nonce).rendered,
             timeout_seconds,
         )
         if fkind == "ok":

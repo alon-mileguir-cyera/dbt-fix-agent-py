@@ -237,7 +237,15 @@ def _apply_line_range_edits(target: Path, edits: List[Edit]) -> None:
     for edit in sorted(edits, key=lambda e: e.start_line, reverse=True):  # type: ignore[arg-type]
         assert edit.start_line is not None and edit.end_line is not None
         assert edit.replacement is not None
-        lines[edit.start_line - 1 : edit.end_line] = [edit.replacement]
+        replacement = edit.replacement
+        # Guard against fusing with the following line (red-team finding 3):
+        # a non-empty replacement lacking a trailing newline, spliced as one
+        # element while NOT replacing the file's final line, would merge into
+        # the next line and corrupt adjacent content. Re-add the newline when
+        # a following line exists.
+        if replacement and not replacement.endswith("\n") and edit.end_line < len(lines):
+            replacement += "\n"
+        lines[edit.start_line - 1 : edit.end_line] = [replacement]
 
     target.write_text("".join(lines), encoding="utf-8", newline="")
 

@@ -52,7 +52,7 @@ from typing import Callable, Dict, Mapping, Optional, Tuple
 
 from .diffparse import DiffParseError, PatchApplyError, apply_diff
 from .env import FailureKind
-from .intake import AUDIT_CHECK_ENTRY_RE, FAILING_STATUS_TOKENS
+from .intake import AUDIT_CHECK_ENTRY_RE
 
 from .pathsafe import PathTraversalError
 from .scratch import ScratchCopyError, scratch_copy
@@ -301,6 +301,7 @@ _REPORT_SECTION_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 _REPORT_STATE_RE = re.compile(r"\*\*State:\*\*\s*\*\*(?P<state>[A-Z]+)\*\*")
+_REPORT_SEVERITY_RE = re.compile(r"\*\*Severity:\*\*\s*(?P<severity>\w+)")
 
 
 def _check_statuses_from_report(report_text: str) -> Dict[str, str]:
@@ -312,9 +313,25 @@ def _check_statuses_from_report(report_text: str) -> Dict[str, str]:
     return statuses
 
 
+def _check_severities_from_report(report_text: str) -> Dict[str, str]:
+    severities: Dict[str, str] = {}
+    for match in _REPORT_SECTION_RE.finditer(report_text):
+        sev_match = _REPORT_SEVERITY_RE.search(match.group("body"))
+        if sev_match is not None:
+            severities[match.group("id")] = sev_match.group("severity").lower()
+    return severities
+
+
+# Explicit PASS allowlist, NOT a failing-token denylist: a check the auditor
+# could not CONFIRM (UNCONFIRMED / SKIPPED / WARN / pending / n-a / empty) is
+# NOT a pass. Reading a failure-to-judge as "fixed" was a critical fail-open
+# (red-team finding A) - an UNCONFIRMED originally-failing check would clear
+# the efficacy gate. Only an affirmative pass state counts.
+_PASSING_STATES = frozenset({"PASS", "PASSED", "PASSING", "OK"})
+
+
 def _check_is_passing(status: str) -> bool:
-    upper = status.upper()
-    return status != "" and not any(token in upper for token in FAILING_STATUS_TOKENS)
+    return status.strip().upper() in _PASSING_STATES
 
 
 def run_reaudit_gate(
@@ -563,6 +580,33 @@ def run_reaudit_gate(
                 ),
                 auditor_verdict=parsed.verdict,
                 checked_identifiers=tuple(originally_failing_check_ids),
+            )
+
+    # Defense-in-depth (red-team finding B): a fix must not clear the named
+    # check while REGRESSING another. The gate previously trusted the stdout
+    # verdict line + only the originally-named checks, so a fix that broke a
+    # different (non-originally-failing) critical check could still pass if
+    # the verdict line wasn't literally BLOCKED. Reject if the authoritative
+    # per-check report shows ANY non-advisory check failing - regardless of
+    # whether it was originally failing. Advisory checks (never blocking) are
+    # exempt; unknown severity is treated as non-advisory (fail closed).
+    if report_text:
+        severities = _check_severities_from_report(report_text)
+        regressed = sorted(
+            cid
+            for cid, state in parsed.check_statuses.items()
+            if not _check_is_passing(state)
+            and severities.get(cid, "critical").lower() != "advisory"
+        )
+        if regressed:
+            return ReAuditVerdict(
+                passed=False,
+                violation="auditor_check_regressed",
+                reason=(
+                    "the re-audit report shows non-advisory check(s) not passing, so the "
+                    f"fix is not safe: {', '.join(regressed)}"
+                ),
+                auditor_verdict=parsed.verdict,
             )
 
     return ReAuditVerdict(

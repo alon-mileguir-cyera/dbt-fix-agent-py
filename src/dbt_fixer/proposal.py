@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable, Literal, Optional, Sequence, Tuple
 
 from .bounds import BoundedExecutionError, ExecutionBudget
-from .fencing import FencedContext
+from .fencing import FencedContext, fence_field, generate_nonce
 from .model_output import extract_json_object
 from .pathsafe import resolve_within_root
 
@@ -437,7 +437,14 @@ def run_proposal_pass(
         # fail-closed path.
         try:
             budget.record_turn()
-            retry_prompt = FINALIZATION_INSTRUCTIONS + raw_text[-6000:]
+            # Re-fence the reflected prior output (red-team injection #2):
+            # attacker content echoed into the model's first (unparseable)
+            # narration must not re-enter this nudge UNFENCED as "your
+            # previous response". Wrap it in an untrusted marker.
+            retry_prompt = (
+                FINALIZATION_INSTRUCTIONS
+                + fence_field("prior_response", raw_text[-6000:], generate_nonce()).rendered
+            )
             raw_retry = runner(retry_prompt)
             retry_proposal = parse_proposal(raw_retry)
             if retry_proposal is not None:
