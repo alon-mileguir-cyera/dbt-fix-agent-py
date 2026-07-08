@@ -66,6 +66,7 @@ def test_parses_valid_line_range_edit_proposal() -> None:
                     "path": "models/staging/stg_customers.sql",
                     "start_line": 3,
                     "end_line": 5,
+                    "expected": "    old_id,\n    old_email,\n",
                     "replacement": "    id,\n    email,\n",
                 }
             ],
@@ -80,6 +81,7 @@ def test_parses_valid_line_range_edit_proposal() -> None:
     assert edit.kind == "line_range_edit"
     assert edit.start_line == 3
     assert edit.end_line == 5
+    assert edit.expected == "    old_id,\n    old_email,\n"
     assert edit.replacement == "    id,\n    email,\n"
 
 
@@ -93,6 +95,7 @@ def test_parses_proposal_with_multiple_edits() -> None:
                     "path": "b.sql",
                     "start_line": 1,
                     "end_line": 1,
+                    "expected": "select 1",
                     "replacement": "select 2",
                 },
             ],
@@ -535,3 +538,23 @@ def test_exhausted_budget_blocks_the_fallback():
     result = run_proposal_pass(lambda p: calls.append(p) or "narration", "p", budget)
     assert not result.ok
     assert len(calls) == 1  # turn cap exhausted -> no fallback call
+
+
+def test_line_range_edit_without_expected_is_rejected():
+    import json as _json
+    from dbt_fixer.proposal import parse_proposal
+    raw = _json.dumps({"edits": [{
+        "type": "line_range_edit", "path": "a.sql",
+        "start_line": 1, "end_line": 1, "replacement": "x",
+    }], "rationale": "no expected field"})
+    assert parse_proposal(raw) is None
+
+
+def test_line_range_edit_with_empty_expected_is_rejected():
+    import json as _json
+    from dbt_fixer.proposal import parse_proposal
+    raw = _json.dumps({"edits": [{
+        "type": "line_range_edit", "path": "a.sql",
+        "start_line": 1, "end_line": 1, "expected": "", "replacement": "x",
+    }], "rationale": "empty expected"})
+    assert parse_proposal(raw) is None

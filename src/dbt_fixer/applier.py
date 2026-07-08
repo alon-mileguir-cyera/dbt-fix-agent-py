@@ -19,7 +19,7 @@ conflicting edit is rejected in its entirety: this module never applies a
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -31,6 +31,7 @@ __all__ = [
     "EditTargetNotFoundError",
     "EditTargetIsDirectoryError",
     "InvalidLineRangeError",
+    "AnchorMismatchError",
     "ConflictingEditsError",
     "AppliedProposal",
     "apply_proposal",
@@ -60,6 +61,16 @@ class EditTargetIsDirectoryError(ApplyError):
 
 class InvalidLineRangeError(ApplyError):
     """A `line_range_edit`'s `start_line`/`end_line` is out of bounds for its target."""
+
+
+class AnchorMismatchError(ApplyError):
+    """A `line_range_edit`'s `expected` text could not be uniquely located.
+
+    Raised when the verbatim `expected` block is neither at the model's
+    stated line range nor findable as a unique contiguous run elsewhere in
+    the file (absent, or ambiguous). Applying by raw line number anyway
+    would risk silently corrupting the file, so the whole proposal is
+    rejected fail-closed instead."""
 
 
 class ConflictingEditsError(ApplyError):
@@ -137,6 +148,52 @@ def _check_conflicts(edits_by_path: Dict[str, List[Edit]]) -> None:
                     f"[{first.start_line}, {first.end_line}] and "
                     f"[{second.start_line}, {second.end_line}]"
                 )
+
+
+def _lines_match(a: List[str], b: List[str]) -> bool:
+    """Compare two line lists ignoring per-line trailing newlines (so a
+    file's final no-newline line matches an `expected` block that has one,
+    and vice versa)."""
+    return [x.rstrip("\n") for x in a] == [y.rstrip("\n") for y in b]
+
+
+def _anchor_line_range_edit(edit: Edit, target: Path) -> Edit:
+    """Correct `edit`'s line range to where its `expected` text actually is.
+
+    LLMs miscount 1-indexed inclusive ranges (live finding: a fix's range
+    was off by one, and applying it positionally duplicated a model block
+    and clobbered a sibling). So the range is treated as a hint: if the
+    file's lines at [start, end] already equal `expected`, the edit is used
+    as-is; otherwise `expected` is searched for as a unique contiguous run
+    and the range is corrected to it. Absent or ambiguous -> reject.
+    """
+    assert edit.start_line is not None and edit.end_line is not None
+    assert edit.expected is not None
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    expected_lines = edit.expected.splitlines(keepends=True)
+    n = len(expected_lines)
+    if n == 0:
+        raise AnchorMismatchError(f"{edit.path!r}: line_range_edit 'expected' text is empty")
+
+    s, e = edit.start_line, edit.end_line
+    if 1 <= s <= e <= len(lines) and _lines_match(lines[s - 1 : e], expected_lines):
+        return edit  # the model's own range is correct
+
+    matches = [
+        i for i in range(0, len(lines) - n + 1) if _lines_match(lines[i : i + n], expected_lines)
+    ]
+    if len(matches) == 1:
+        i = matches[0]
+        return replace(edit, start_line=i + 1, end_line=i + n)
+    if not matches:
+        raise AnchorMismatchError(
+            f"{edit.path!r}: the line_range_edit 'expected' text was not found; the stated "
+            f"range [{s}, {e}] does not match the file and the expected block appears nowhere"
+        )
+    raise AnchorMismatchError(
+        f"{edit.path!r}: the line_range_edit 'expected' text appears {len(matches)} times; "
+        "the target is ambiguous. Make the expected block larger/unique."
+    )
 
 
 def _validate_line_range(edit: Edit, target: Path) -> None:
@@ -217,6 +274,11 @@ def apply_proposal(scratch_root: "str | Path", proposal: Proposal) -> AppliedPro
     targets_by_path: Dict[str, Path] = {}
     for edit in proposal.edits:
         target = _resolved_target(scratch_root, edit)
+        # Content-anchor line_range_edits to their true location (correcting
+        # model line-number drift) BEFORE conflict/bounds checks and before
+        # any mutation, so every downstream step sees the corrected range.
+        if edit.kind == "line_range_edit":
+            edit = _anchor_line_range_edit(edit, target)
         targets_by_path.setdefault(edit.path, target)
         edits_by_path.setdefault(edit.path, []).append(edit)
 

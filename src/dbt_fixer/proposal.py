@@ -47,7 +47,7 @@ _CREATE_FILE_ALLOWED_SUFFIXES: Tuple[str, ...] = (".yml", ".yaml", ".md")
 _TOP_LEVEL_KEYS = frozenset({"edits", "rationale"})
 _WHOLE_FILE_KEYS = frozenset({"type", "path", "content"})
 _CREATE_FILE_KEYS = frozenset({"type", "path", "content"})
-_LINE_RANGE_KEYS = frozenset({"type", "path", "start_line", "end_line", "replacement"})
+_LINE_RANGE_KEYS = frozenset({"type", "path", "start_line", "end_line", "expected", "replacement"})
 
 # The exact JSON shape the model must answer in. Kept as a single constant so
 # the prompt text and the parser's schema can never silently drift apart.
@@ -68,7 +68,7 @@ matching this schema precisely:
 {
   "edits": [
     {"type": "whole_file_replace", "path": "<repo-relative path>", "content": "<full new file content>"},
-    {"type": "line_range_edit", "path": "<repo-relative path>", "start_line": <int, 1-indexed, inclusive>, "end_line": <int, 1-indexed, inclusive>, "replacement": "<replacement text>"},
+    {"type": "line_range_edit", "path": "<repo-relative path>", "start_line": <int, 1-indexed, inclusive>, "end_line": <int, 1-indexed, inclusive>, "expected": "<the EXACT current text of those lines, verbatim>", "replacement": "<replacement text>"},
     {"type": "create_file", "path": "<repo-relative path of a NEW .yml/.yaml/.md file>", "content": "<full file content>"}
   ],
   "rationale": "<plain-language explanation of why this fixes the named failure>"
@@ -81,6 +81,13 @@ Rules:
   exists in the checkout. create_file must target a path that does NOT
   exist yet, and may only create .yml/.yaml/.md files (e.g. a missing
   schema/models .yml file) - never .sql.
+- For line_range_edit, "expected" MUST be the exact, verbatim current text
+  of lines start_line..end_line (copy it precisely, including indentation).
+  It is used to locate the edit by CONTENT - if your line numbers are
+  slightly off but "expected" matches a unique block, the edit still lands
+  correctly; if "expected" cannot be found, the edit is rejected rather
+  than applied to the wrong place. Keep the range small and specific so the
+  expected text is unique in the file.
 - If you cannot identify a safe, minimal fix, do not guess: answer with an
   empty "edits" list and explain why in "rationale".
 - Do not include any text outside the single JSON object.
@@ -127,6 +134,7 @@ class Edit:
     content: Optional[str] = None
     start_line: Optional[int] = None
     end_line: Optional[int] = None
+    expected: Optional[str] = None
     replacement: Optional[str] = None
 
 
@@ -180,6 +188,7 @@ def _parse_edit(raw: object) -> Optional[Edit]:
     path = raw.get("path")
     start_line = raw.get("start_line")
     end_line = raw.get("end_line")
+    expected = raw.get("expected")
     replacement = raw.get("replacement")
     if not isinstance(path, str) or not path.strip():
         return None
@@ -190,6 +199,11 @@ def _parse_edit(raw: object) -> Optional[Edit]:
         return None
     if start_line < 1 or end_line < start_line:
         return None
+    # `expected` is the verbatim text currently at [start_line, end_line]; the
+    # applier anchors on it (correcting model line-number drift) and rejects
+    # if it can't be located. Must be a non-empty string.
+    if not isinstance(expected, str) or expected == "":
+        return None
     if not isinstance(replacement, str):
         return None
     return Edit(
@@ -197,6 +211,7 @@ def _parse_edit(raw: object) -> Optional[Edit]:
         path=path,
         start_line=start_line,
         end_line=end_line,
+        expected=expected,
         replacement=replacement,
     )
 

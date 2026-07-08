@@ -18,6 +18,7 @@ from dbt_fixer.applier import (
     ConflictingEditsError,
     EditTargetIsDirectoryError,
     EditTargetNotFoundError,
+    AnchorMismatchError,
     InvalidLineRangeError,
     apply_proposal,
 )
@@ -61,6 +62,7 @@ def test_applies_line_range_edit(tmp_path: Path) -> None:
         path="models/a.sql",
         start_line=2,
         end_line=3,
+        expected="    id,\n    email\n",
         replacement="    id,\n    email,\n    created_at\n",
     )
 
@@ -84,6 +86,7 @@ def test_line_range_edit_preserves_indentation_and_line_endings_outside_range(tm
         path="models/indented.sql",
         start_line=2,
         end_line=2,
+        expected="\tid,\n",
         replacement="\tid,\n\tfull_name,\n",
     )
 
@@ -106,6 +109,7 @@ def test_line_range_edit_on_final_line_without_trailing_newline(tmp_path: Path) 
         path="models/no_trailing_newline.sql",
         start_line=2,
         end_line=2,
+        expected="select 2",
         replacement="select 999",
     )
 
@@ -118,13 +122,15 @@ def test_line_range_edit_on_final_line_without_trailing_newline(tmp_path: Path) 
 def test_applies_multiple_non_overlapping_line_range_edits_to_same_file(tmp_path: Path) -> None:
     root = _make_scratch(tmp_path)
     edit_top = Edit(
-        kind="line_range_edit", path="models/a.sql", start_line=1, end_line=1, replacement="SELECT\n"
+        kind="line_range_edit", path="models/a.sql", start_line=1, end_line=1,
+        expected="select\n", replacement="SELECT\n"
     )
     edit_bottom = Edit(
         kind="line_range_edit",
         path="models/a.sql",
         start_line=4,
         end_line=4,
+        expected="from raw.customers\n",
         replacement="FROM raw.customers\n",
     )
 
@@ -203,14 +209,15 @@ def test_rejects_path_traversal_target(tmp_path: Path) -> None:
         apply_proposal(root, _proposal(edit))
 
 
-def test_rejects_out_of_bounds_line_range_and_leaves_scratch_untouched(tmp_path: Path) -> None:
+def test_rejects_line_range_edit_whose_expected_text_is_absent(tmp_path: Path) -> None:
     root = _make_scratch(tmp_path)
     original_a = (root / "models" / "a.sql").read_text(encoding="utf-8")
     edit = Edit(
-        kind="line_range_edit", path="models/a.sql", start_line=10, end_line=12, replacement="x\n"
+        kind="line_range_edit", path="models/a.sql", start_line=10, end_line=12,
+        expected="this text is nowhere in the file\n", replacement="x\n"
     )
 
-    with pytest.raises(InvalidLineRangeError):
+    with pytest.raises(AnchorMismatchError):
         apply_proposal(root, _proposal(edit))
 
     assert (root / "models" / "a.sql").read_text(encoding="utf-8") == original_a
@@ -229,7 +236,8 @@ def test_rejects_whole_file_replace_and_line_range_edit_on_same_path(tmp_path: P
     root = _make_scratch(tmp_path)
     whole = Edit(kind="whole_file_replace", path="models/a.sql", content="one\n")
     ranged = Edit(
-        kind="line_range_edit", path="models/a.sql", start_line=1, end_line=1, replacement="x\n"
+        kind="line_range_edit", path="models/a.sql", start_line=1, end_line=1,
+        expected="select\n", replacement="x\n"
     )
 
     with pytest.raises(ConflictingEditsError):
@@ -239,10 +247,12 @@ def test_rejects_whole_file_replace_and_line_range_edit_on_same_path(tmp_path: P
 def test_rejects_overlapping_line_range_edits_on_same_path(tmp_path: Path) -> None:
     root = _make_scratch(tmp_path)
     edit_one = Edit(
-        kind="line_range_edit", path="models/a.sql", start_line=1, end_line=2, replacement="x\n"
+        kind="line_range_edit", path="models/a.sql", start_line=1, end_line=2,
+        expected="select\n    id,\n", replacement="x\n"
     )
     edit_two = Edit(
-        kind="line_range_edit", path="models/a.sql", start_line=2, end_line=3, replacement="y\n"
+        kind="line_range_edit", path="models/a.sql", start_line=2, end_line=3,
+        expected="    id,\n    email\n", replacement="y\n"
     )
 
     with pytest.raises(ConflictingEditsError):
@@ -313,3 +323,64 @@ def test_create_file_traversal_rejected(tmp_path):
     )
     with pytest.raises(PathTraversalError):
         apply_proposal(tmp_path, proposal)
+
+
+# ---------------------------------------------------------------------------
+# content-anchoring: the off-by-one that corrupted a file in production
+# (bi-dbt #2533 round 7) must now self-correct or reject, never corrupt
+# ---------------------------------------------------------------------------
+
+
+def _anchor_repo(tmp_path: Path) -> Path:
+    root = tmp_path / "scratch"
+    (root / "m").mkdir(parents=True)
+    # Two sibling model blocks; the second must NEVER be clobbered.
+    (root / "m" / "s.yml").write_text(
+        "version: 2\n"
+        "models:\n"
+        "  - name: smoke\n"          # line 3
+        "    columns:\n"             # line 4
+        "      - name: team_uid\n"   # line 5
+        "        tests:\n"           # line 6
+        "          - unique\n"       # line 7
+        "  - name: teams\n"          # line 8  (sibling - must survive)
+        "    columns:\n"             # line 9
+        "      - name: id\n",        # line 10
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_off_by_one_line_range_self_corrects_via_expected(tmp_path: Path) -> None:
+    """The model states the wrong range (off by one) but the correct
+    'expected' text; the applier relocates by content and edits the right
+    block, leaving the sibling model intact."""
+    root = _anchor_repo(tmp_path)
+    edit = Edit(
+        kind="line_range_edit",
+        path="m/s.yml",
+        start_line=4,   # WRONG: the block is at 5-7, model said 4-6
+        end_line=6,
+        expected="      - name: team_uid\n        tests:\n          - unique\n",
+        replacement="      - name: id\n        tests:\n          - unique\n",
+    )
+    apply_proposal(root, _proposal(edit))
+    result = (root / "m" / "s.yml").read_text(encoding="utf-8")
+    assert "- name: id" in result
+    assert "team_uid" not in result
+    assert result.count("- name: smoke") == 1     # not duplicated
+    assert "- name: teams" in result               # sibling survived
+    assert result.count("- name: id") == 2         # renamed col + teams.id
+
+
+def test_ambiguous_expected_is_rejected_not_misapplied(tmp_path: Path) -> None:
+    root = tmp_path / "scratch"
+    (root / "m").mkdir(parents=True)
+    (root / "m" / "d.sql").write_text("x\nx\ny\n", encoding="utf-8")  # 'x\n' twice
+    edit = Edit(
+        kind="line_range_edit", path="m/d.sql", start_line=5, end_line=5,
+        expected="x\n", replacement="z\n",
+    )
+    with pytest.raises(AnchorMismatchError):
+        apply_proposal(root, _proposal(edit))
+    assert (root / "m" / "d.sql").read_text(encoding="utf-8") == "x\nx\ny\n"
