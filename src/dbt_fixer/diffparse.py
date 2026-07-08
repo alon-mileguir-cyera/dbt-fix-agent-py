@@ -138,6 +138,20 @@ class FileDiffBlock:
         )
 
 
+_GIT_METADATA_RE = re.compile(
+    r"^(index [0-9a-f]+\.\.[0-9a-f]+( \d+)?"
+    r"|old mode \d+"
+    r"|new mode \d+"
+    r"|new file mode \d+"
+    r"|deleted file mode \d+"
+    r"|similarity index \d+%"
+    r"|dissimilarity index \d+%"
+    r"|rename (from|to) .*"
+    r"|copy (from|to) .*"
+    r"|Binary files .*)$"
+)
+
+
 def _strip_ab_prefix(path: str) -> str:
     """Strip a leading `a/` or `b/` prefix from a diff header path, if present."""
 
@@ -237,6 +251,16 @@ def parse_diff(diff_text: str) -> Tuple[FileDiffBlock, ...]:
             raise DiffParseError(f"expected a 'diff --git' header, got: {raw_lines[index]!r}")
         path = header_match.group("b")
         index += 1
+
+        # Real `git diff` output carries metadata lines between the
+        # `diff --git` header and the `---` line (index/mode/rename/
+        # similarity/Binary). This package's own differ never emits them,
+        # but the PR diff handed in from CI does (first hit live:
+        # bi-dbt #2533 round 5, `index e6a745c2..11a2589e 100644`).
+        # Skip them; a pure-rename/binary block with no hunks is handled
+        # by the no-'---' branch below.
+        while index < len(raw_lines) and _GIT_METADATA_RE.match(raw_lines[index]):
+            index += 1
 
         if index >= len(raw_lines):
             raise DiffParseError(f"diff header for {path!r} has no '---'/'+++' lines")

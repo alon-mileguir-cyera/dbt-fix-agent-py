@@ -150,3 +150,44 @@ def test_removed_and_added_lines_are_newline_stripped() -> None:
     block = parse_diff(diff_text)[0]
     assert block.removed_lines() == ("old",)
     assert block.added_lines() == ("new",)
+
+
+def test_parse_diff_tolerates_real_git_metadata_lines():
+    """Live finding (bi-dbt #2533 round 5): CI hands the fixer raw `git
+    diff` output, which carries index/mode metadata between the header and
+    the '---' line. The parser must skip it."""
+    from dbt_fixer.diffparse import parse_diff
+
+    diff = (
+        "diff --git a/models/x.yml b/models/x.yml\n"
+        "index e6a745c2..11a2589e 100644\n"
+        "--- a/models/x.yml\n"
+        "+++ b/models/x.yml\n"
+        "@@ -1 +1,2 @@\n"
+        " version: 2\n"
+        "+# note\n"
+        "diff --git a/models/new.sql b/models/new.sql\n"
+        "new file mode 100644\n"
+        "index 00000000..59b97e29\n"
+        "--- /dev/null\n"
+        "+++ b/models/new.sql\n"
+        "@@ -0,0 +1 @@\n"
+        "+select 1\n"
+    )
+    blocks = parse_diff(diff)
+    assert [b.path for b in blocks] == ["models/x.yml", "models/new.sql"]
+    assert blocks[0].change_kind == "modified"
+    assert blocks[1].change_kind == "added"
+
+
+def test_invert_diff_survives_git_metadata_lines():
+    from dbt_fixer.diffparse import invert_diff
+
+    diff = (
+        "diff --git a/a.yml b/a.yml\n"
+        "index abc12345..def67890 100644\n"
+        "--- a/a.yml\n+++ b/a.yml\n@@ -1 +1 @@\n-x\n+y\n"
+    )
+    inverted = invert_diff(diff)
+    assert "-y" in inverted and "+x" in inverted
+    assert "index " not in inverted  # inverted output is the package dialect
