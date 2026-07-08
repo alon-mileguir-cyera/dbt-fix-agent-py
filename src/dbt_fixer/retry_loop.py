@@ -174,7 +174,10 @@ def run_bounded_fix_attempt(
         max_changed_files=config.max_changed_files,
         max_changed_lines=config.max_changed_lines,
     )
-    originally_failing_ids: Tuple[str, ...] = target.identifiers
+    # Only checks the fixer is responsible for clearing (excludes known
+    # advisory checks - they never block, and the allowlist forbids the
+    # doc/style edits that would clear them). See FailureTarget.
+    originally_failing_ids: Tuple[str, ...] = target.blocking_identifiers
 
     # Pre-load the files the findings name, once, so the model doesn't burn
     # its tool-call/wall-clock budget rediscovering what the audit already

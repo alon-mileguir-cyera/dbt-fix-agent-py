@@ -275,3 +275,42 @@ def test_real_passed_report_has_nothing_to_fix():
     target, reason = parse_failure_target("audit", passed)
     assert target is None
     assert "nothing to fix" in reason
+
+
+def test_real_report_captures_severity_and_blocking_ids_excludes_advisory():
+    """Live finding (bi-dbt #2533 round 8): the efficacy gate must not
+    require an advisory check to pass - the fixer isn't responsible for
+    (or allowed to make) doc/style fixes. blocking_identifiers drops
+    known-advisory checks; unknown severity stays blocking."""
+    from dbt_fixer.intake import parse_failure_target
+
+    report = (
+        "# Verdict: **BLOCKED**\n\n"
+        "### Schema Contract Verification (`schema_contract_verification`)\n\n"
+        "**Severity:** Critical &nbsp; **Score:** 0/100 &nbsp; **State:** **FAIL**\n\n"
+        "**Evidence:**\n\n> mismatch\n\n"
+        "### SQL Style and Testability (`sql_style_and_testability`)\n\n"
+        "**Severity:** Advisory &nbsp; **Score:** 25/100 &nbsp; **State:** **FAIL**\n\n"
+        "**Evidence:**\n\n> undocumented\n"
+    )
+    target, reason = parse_failure_target("audit", report)
+    assert target is not None, reason
+    ids = set(target.identifiers)
+    assert ids == {"schema_contract_verification", "sql_style_and_testability"}
+    # advisory dropped from the efficacy requirement; critical kept
+    assert target.blocking_identifiers == ("schema_contract_verification",)
+
+
+def test_unknown_severity_stays_blocking():
+    """CI/legacy checks have no severity - they must remain required."""
+    from dbt_fixer.intake import FailingCheck, FailureTarget
+
+    target = FailureTarget(
+        kind="ci",
+        checks=(
+            FailingCheck(identifier="a"),                       # unknown
+            FailingCheck(identifier="b", severity="critical"),
+            FailingCheck(identifier="c", severity="advisory"),
+        ),
+    )
+    assert target.blocking_identifiers == ("a", "b")

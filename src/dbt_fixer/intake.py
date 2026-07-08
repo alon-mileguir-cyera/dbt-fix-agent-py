@@ -63,6 +63,7 @@ _REAL_SECTION_RE = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 _REAL_STATE_RE = re.compile(r"\*\*State:\*\*\s*\*\*(?P<state>[A-Z]+)\*\*")
+_REAL_SEVERITY_RE = re.compile(r"\*\*Severity:\*\*\s*(?P<severity>\w+)")
 _REAL_EVIDENCE_RE = re.compile(
     r"\*\*Evidence:\*\*\s*(?P<quote>(?:^>.*$\n?)+)", re.MULTILINE
 )
@@ -90,6 +91,9 @@ class FailingCheck:
     identifier: str
     evidence: str = ""
     suggestion: str = ""
+    # "critical" | "advisory" | "" (unknown). Only KNOWN-advisory checks are
+    # dropped from the re-audit efficacy requirement; unknown stays required.
+    severity: str = ""
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,18 @@ class FailureTarget:
     @property
     def identifiers(self) -> Tuple[str, ...]:
         return tuple(c.identifier for c in self.checks)
+
+    @property
+    def blocking_identifiers(self) -> Tuple[str, ...]:
+        """Identifiers the fixer is actually responsible for resolving:
+        every failing check EXCEPT those explicitly marked advisory. An
+        advisory check ('a human should look') never causes a BLOCK on its
+        own, so requiring the fix to also clear it is overreach - and the
+        allowlist forbids the doc/style edits that would (live finding:
+        bi-dbt #2533 round 8, a clean schema fix rejected because advisory
+        sql_style_and_testability stayed failing). Unknown severity (CI,
+        legacy) is treated as blocking, so those paths are unchanged."""
+        return tuple(c.identifier for c in self.checks if c.severity.lower() != "advisory")
 
 
 @dataclass(frozen=True)
@@ -167,7 +183,11 @@ def _parse_real_audit_report(raw: str) -> Tuple[Tuple[FailingCheck, ...], Option
                 line.lstrip("> ").rstrip()
                 for line in evidence_match.group("quote").splitlines()
             ).strip()
-        checks.append(FailingCheck(identifier=match.group("id"), evidence=evidence))
+        severity_match = _REAL_SEVERITY_RE.search(body)
+        severity = severity_match.group("severity").lower() if severity_match else ""
+        checks.append(
+            FailingCheck(identifier=match.group("id"), evidence=evidence, severity=severity)
+        )
     return tuple(checks), verdict, True
 
 
