@@ -88,4 +88,24 @@ def run_stage1(env: Optional[Mapping[str, str]] = None) -> Stage1Outcome:
             ),
         )
 
+    # SAFETY: never auto-fix a judgment-critical failure (tenant isolation,
+    # RAP bypass, destructive ops, sensitive data). These need human review;
+    # attempting them would lean on the re-audit - the same auditor that is
+    # least reliable on exactly these judgment calls. Decline up front.
+    target = intake.target
+    if target is not None:
+        jc = target.judgment_critical_blocking_ids
+        if jc:
+            return Stage1Outcome(
+                config=config,
+                intake=intake,
+                terminal=RunResult(
+                    status="no_safe_fix",
+                    reason=(
+                        "the failing check(s) require human review and are never "
+                        f"auto-fixed: {', '.join(jc)}"
+                    ),
+                ),
+            )
+
     return Stage1Outcome(config=config, intake=intake, terminal=None)

@@ -84,6 +84,18 @@ AUDIT_CHECK_ENTRY_RE = _AUDIT_CHECK_RE
 FAILING_STATUS_TOKENS = _FAILING_STATUS_TOKENS
 
 
+# Judgment-critical audit checks the fixer must NEVER attempt to auto-fix -
+# they require human review. Mechanical criticals (schema_contract_verification,
+# downstream_dependency_impact) and the advisory check are fixable; these are
+# not. Kept lowercase for case-insensitive matching.
+JUDGMENT_CRITICAL_CHECK_IDS = frozenset({
+    "tenant_isolation_integrity",
+    "rap_bypass_logic",
+    "destructive_operation_safety",
+    "sensitive_data_exposure",
+})
+
+
 @dataclass(frozen=True)
 class FailingCheck:
     """One failing model/test/check, with whatever evidence/suggestion was found."""
@@ -106,6 +118,20 @@ class FailureTarget:
     @property
     def identifiers(self) -> Tuple[str, ...]:
         return tuple(c.identifier for c in self.checks)
+
+    @property
+    def judgment_critical_blocking_ids(self) -> Tuple[str, ...]:
+        """Blocking checks that are judgment-critical - tenant isolation, RAP
+        bypass, destructive ops, sensitive data. These are flagged precisely
+        because they need HUMAN judgment; the fixer must never auto-fix them
+        (its re-audit gate is the same non-deterministic auditor, least
+        reliable on exactly these calls). Their presence => decline up front."""
+        return tuple(
+            c.identifier
+            for c in self.checks
+            if c.severity.lower() != "advisory"
+            and c.identifier.lower() in JUDGMENT_CRITICAL_CHECK_IDS
+        )
 
     @property
     def blocking_identifiers(self) -> Tuple[str, ...]:
