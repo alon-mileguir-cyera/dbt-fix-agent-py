@@ -144,6 +144,7 @@ def _safe_deliver_to_slack(
     config: Optional[FixerConfig],
     diff: Optional[str],
     env: Optional[Mapping[str, str]],
+    target: Optional[FailureTarget] = None,
 ) -> SlackDeliveryResult:
     """Call `deliver_slack` and never let it affect this run's outcome.
 
@@ -151,11 +152,17 @@ def _safe_deliver_to_slack(
     never raises on its own; this wrapper is a second, defensive backstop
     in case an injected fake in a test -- or a future change to the real
     implementation -- ever does.
+
+    `target`, when known, supplies the one-line *Problem:* summary (the
+    failing check(s) + a short evidence snippet) shown in the Slack post so
+    the reader sees what was flagged before the proposed change. Purely
+    presentational; its absence just omits that line.
     """
 
     channel = config.slack_channel if config is not None else None
     failure_kind = config.failure_kind if config is not None else "ci"
     pr_url = config.pr_url if config is not None else ""
+    problem_summary = target.problem_summary if target is not None else ""
 
     try:
         return deliver_slack(
@@ -163,6 +170,7 @@ def _safe_deliver_to_slack(
             failure_kind=failure_kind,
             pr_url=pr_url,
             candidate_diff=diff or "",
+            problem_summary=problem_summary,
             channel=channel,
             token_env=dict(env) if env is not None else None,
         )
@@ -218,8 +226,17 @@ def compute_entrypoint_outcome(
         return EntrypointOutcome(run_result=run_result)
 
     if stage1.terminal is not None:
+        # `intake.target` is present on the judgment-critical decline and on a
+        # parsed-but-not-ok intake, so a declined run still names what was
+        # flagged; a bad-environment terminal has no target and omits it.
+        terminal_target = stage1.intake.target if stage1.intake is not None else None
         _safe_deliver_to_slack(
-            deliver_slack, run_result=stage1.terminal, config=stage1.config, diff=None, env=env
+            deliver_slack,
+            run_result=stage1.terminal,
+            config=stage1.config,
+            diff=None,
+            env=env,
+            target=terminal_target,
         )
         return EntrypointOutcome(run_result=stage1.terminal)
 
@@ -238,11 +255,23 @@ def compute_entrypoint_outcome(
         run_result = RunResult(
             status="failed", reason=f"unexpected error running the fix pipeline: {exc!r}"
         )
-        _safe_deliver_to_slack(deliver_slack, run_result=run_result, config=config, diff=None, env=env)
+        _safe_deliver_to_slack(
+            deliver_slack,
+            run_result=run_result,
+            config=config,
+            diff=None,
+            env=env,
+            target=target,
+        )
         return EntrypointOutcome(run_result=run_result)
 
     _safe_deliver_to_slack(
-        deliver_slack, run_result=attempt.run_result, config=config, diff=attempt.diff, env=env
+        deliver_slack,
+        run_result=attempt.run_result,
+        config=config,
+        diff=attempt.diff,
+        env=env,
+        target=target,
     )
     return EntrypointOutcome(run_result=attempt.run_result, diff=attempt.diff)
 

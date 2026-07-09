@@ -134,6 +134,28 @@ class FailureTarget:
         )
 
     @property
+    def problem_summary(self) -> str:
+        """A brief, human-readable summary of WHAT was flagged, for the Slack
+        post -- the failing check(s) and a short evidence snippet each. This
+        answers "why is the fixer here?" up front, before the proposed change.
+        Blocking checks lead (advisory ones are appended, capped) and each
+        evidence snippet is whitespace-collapsed and truncated so the summary
+        stays a couple of lines. Purely presentational: never affects the run."""
+        ordered = sorted(
+            self.checks, key=lambda c: (c.severity.lower() == "advisory", self.checks.index(c))
+        )
+        parts: "list[str]" = []
+        for check in ordered[:3]:
+            evidence = " ".join(check.evidence.split())
+            if len(evidence) > 160:
+                evidence = evidence[:157].rstrip() + "..."
+            parts.append(f"`{check.identifier}`" + (f" -- {evidence}" if evidence else ""))
+        summary = "; ".join(parts)
+        if len(ordered) > 3:
+            summary += f"; (+{len(ordered) - 3} more)"
+        return summary
+
+    @property
     def blocking_identifiers(self) -> Tuple[str, ...]:
         """Identifiers the fixer is actually responsible for resolving:
         every failing check EXCEPT those explicitly marked advisory. An

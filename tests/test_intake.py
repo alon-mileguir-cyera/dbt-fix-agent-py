@@ -314,3 +314,47 @@ def test_unknown_severity_stays_blocking():
         ),
     )
     assert target.blocking_identifiers == ("a", "b")
+
+
+def test_problem_summary_names_checks_with_evidence_and_leads_with_blocking():
+    from dbt_fixer.intake import FailingCheck, FailureTarget
+
+    target = FailureTarget(
+        kind="audit",
+        checks=(
+            FailingCheck(identifier="sql_style", severity="advisory", evidence="minor nit"),
+            FailingCheck(
+                identifier="schema_contract_verification",
+                severity="critical",
+                evidence="yml   declares\ncol `x` the model omits",
+            ),
+        ),
+    )
+    summary = target.problem_summary
+    # Blocking (critical) check leads; advisory is appended.
+    assert summary.index("schema_contract_verification") < summary.index("sql_style")
+    # Evidence is whitespace-collapsed onto one line.
+    assert "yml declares col `x` the model omits" in summary
+    assert "\n" not in summary
+
+
+def test_problem_summary_truncates_long_evidence_and_caps_checks():
+    from dbt_fixer.intake import FailingCheck, FailureTarget
+
+    target = FailureTarget(
+        kind="ci",
+        checks=tuple(
+            FailingCheck(identifier=f"check_{i}", evidence="e" * 300) for i in range(5)
+        ),
+    )
+    summary = target.problem_summary
+    assert "..." in summary  # long evidence truncated
+    assert "(+2 more)" in summary  # only 3 checks shown, 2 summarized
+    assert "check_4" not in summary
+
+
+def test_problem_summary_handles_no_evidence():
+    from dbt_fixer.intake import FailingCheck, FailureTarget
+
+    target = FailureTarget(kind="ci", checks=(FailingCheck(identifier="my_test"),))
+    assert target.problem_summary == "`my_test`"

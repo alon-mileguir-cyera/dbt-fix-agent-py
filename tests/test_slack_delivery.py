@@ -506,6 +506,39 @@ def test_summary_states_what_the_patch_does():
     assert "*Proposed change:* creates `proj/models/staging/_x__models.yml` (+2 lines)" in text
 
 
+def test_summary_includes_problem_line_when_provided():
+    from dbt_fixer.slack_delivery import _build_summary_text
+    from dbt_fixer.status import GateResult, RunResult
+
+    text = _build_summary_text(
+        RunResult(status="proposed", reason="ok", gates=[GateResult("allowlist", "pass")]),
+        failure_kind="audit",
+        pr_url="https://example.com/pr/1",
+        candidate_diff="",
+        problem_summary="`schema_contract_verification` -- yml declares a column the model omits",
+    )
+    assert (
+        "*Problem:* `schema_contract_verification` -- yml declares a column the model omits"
+        in text
+    )
+    # Problem sits between the failure kind and the reason.
+    assert text.index("*Failure kind:*") < text.index("*Problem:*") < text.index("\nok")
+
+
+def test_summary_omits_problem_line_when_absent():
+    from dbt_fixer.slack_delivery import _build_summary_text
+    from dbt_fixer.status import RunResult
+
+    text = _build_summary_text(
+        RunResult(status="no_safe_fix", reason="declined", gates=[]),
+        failure_kind="audit",
+        pr_url="",
+        candidate_diff="",
+        problem_summary="   ",
+    )
+    assert "*Problem:*" not in text
+
+
 def test_diff_file_summary_covers_create_modify_delete():
     from dbt_fixer.slack_delivery import _summarize_diff_files
 

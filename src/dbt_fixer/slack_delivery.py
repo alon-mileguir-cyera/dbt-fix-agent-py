@@ -155,10 +155,20 @@ def _summarize_diff_files(diff_text: str) -> "list[str]":
 
 
 def _build_summary_text(
-    run_result: RunResult, *, failure_kind: str, pr_url: str, candidate_diff: str = ""
+    run_result: RunResult,
+    *,
+    failure_kind: str,
+    pr_url: str,
+    candidate_diff: str = "",
+    problem_summary: str = "",
 ) -> str:
     glyph = run_result.glyph()
     pr_line = f"*PR:* {pr_url.strip()}\n" if pr_url and pr_url.strip() else ""
+    problem_line = (
+        f"*Problem:* {problem_summary.strip()}\n"
+        if problem_summary and problem_summary.strip()
+        else ""
+    )
     reason = run_result.reason.strip() if run_result.reason and run_result.reason.strip() else (
         "no additional detail provided"
     )
@@ -177,6 +187,7 @@ def _build_summary_text(
         f"{glyph} *Status:* `{run_result.status}`\n"
         f"{pr_line}"
         f"*Failure kind:* `{failure_kind}`\n"
+        f"{problem_line}"
         f"{reason}\n"
         f"{change_lines}"
         f"*Gates:* {scoreboard}\n"
@@ -369,6 +380,7 @@ def deliver_shadow_report(
     failure_kind: str,
     pr_url: str = "",
     candidate_diff: str = "",
+    problem_summary: str = "",
     channel: Optional[str],
     token: Optional[str] = None,
     client_factory: SlackClientFactory = default_slack_client_factory,
@@ -463,7 +475,11 @@ def deliver_shadow_report(
 
     summary_text = redact_secrets(
         _build_summary_text(
-            run_result, failure_kind=failure_kind, pr_url=pr_url, candidate_diff=candidate_diff
+            run_result,
+            failure_kind=failure_kind,
+            pr_url=pr_url,
+            candidate_diff=candidate_diff,
+            problem_summary=problem_summary,
         )
     )
     summary_ts, summary_posted, summary_reason = _post_summary(
