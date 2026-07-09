@@ -89,7 +89,7 @@ def run_stage1(env: Optional[Mapping[str, str]] = None) -> Stage1Outcome:
         )
 
     # SAFETY: never auto-fix a judgment-critical failure (tenant isolation,
-    # RAP bypass, destructive ops, sensitive data). These need human review;
+    # RAP bypass, destructive ops, credentials exposure). These need human review;
     # attempting them would lean on the re-audit - the same auditor that is
     # least reliable on exactly these judgment calls. Decline up front.
     target = intake.target

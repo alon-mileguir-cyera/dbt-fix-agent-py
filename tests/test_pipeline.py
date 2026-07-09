@@ -119,7 +119,7 @@ def test_judgment_critical_checks_are_declined_up_front(tmp_path, monkeypatch):
         ("tenant_isolation_integrity", "Tenant Isolation Integrity"),
         ("rap_bypass_logic", "RAP Bypass Logic Safety"),
         ("destructive_operation_safety", "Destructive Operation Safety"),
-        ("sensitive_data_exposure", "Sensitive Data Exposure"),
+        ("credentials_exposure", "Credentials Exposure"),
     ]:
         report = _JUDGMENT_REPORT_TMPL.format(cid=cid, name=name)
         target, reason = parse_failure_target("audit", report)

@@ -92,7 +92,7 @@ JUDGMENT_CRITICAL_CHECK_IDS = frozenset({
     "tenant_isolation_integrity",
     "rap_bypass_logic",
     "destructive_operation_safety",
-    "sensitive_data_exposure",
+    "credentials_exposure",
 })
 
 
@@ -122,7 +122,7 @@ class FailureTarget:
     @property
     def judgment_critical_blocking_ids(self) -> Tuple[str, ...]:
         """Blocking checks that are judgment-critical - tenant isolation, RAP
-        bypass, destructive ops, sensitive data. These are flagged precisely
+        bypass, destructive ops, credentials exposure. These are flagged precisely
         because they need HUMAN judgment; the fixer must never auto-fix them
         (its re-audit gate is the same non-deterministic auditor, least
         reliable on exactly these calls). Their presence => decline up front."""
