@@ -45,6 +45,7 @@ whether Slack is configured or reachable.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Protocol
 
@@ -54,6 +55,28 @@ from .secrets import SecretsManagerClient, get_slack_bot_token
 from .status import RunResult
 
 logger = logging.getLogger(__name__)
+
+# Per-message sender identity (Slack chat.postMessage username/icon overrides).
+# Posts run through the bi-automations house bot (chat:write.customize scope, as
+# the dbt triage agent uses), so the fixer appears as its own sender. Env-
+# overridable; defaults work with no workflow change once that token is in use.
+SLACK_USERNAME_ENV = "DBT_FIXER_SLACK_USERNAME"
+SLACK_ICON_EMOJI_ENV = "DBT_FIXER_SLACK_ICON_EMOJI"
+DEFAULT_SLACK_USERNAME = "dbt fixer agent"
+DEFAULT_SLACK_ICON_EMOJI = ":wrench:"
+
+
+def _resolve_identity(
+    username: Optional[str],
+    icon_emoji: Optional[str],
+    env: Optional[Mapping[str, str]],
+) -> "tuple[str, str]":
+    """Resolve the sender name/icon: explicit arg > env override > default."""
+
+    src = env if env is not None else os.environ
+    name = username if username is not None else src.get(SLACK_USERNAME_ENV, "").strip()
+    icon = icon_emoji if icon_emoji is not None else src.get(SLACK_ICON_EMOJI_ENV, "").strip()
+    return (name or DEFAULT_SLACK_USERNAME, icon or DEFAULT_SLACK_ICON_EMOJI)
 
 __all__ = [
     "SlackClient",
@@ -75,7 +98,13 @@ class SlackClient(Protocol):
     """
 
     def chat_postMessage(
-        self, *, channel: str, text: str, thread_ts: "str | None" = None
+        self,
+        *,
+        channel: str,
+        text: str,
+        thread_ts: "str | None" = None,
+        username: "str | None" = None,
+        icon_emoji: "str | None" = None,
     ) -> Mapping[str, Any]: ...
 
 
@@ -291,12 +320,15 @@ def _build_detail_text(run_result: RunResult, *, candidate_diff: str) -> str:
 
 
 def _post_summary(
-    client: SlackClient, *, channel: str, text: str
+    client: SlackClient, *, channel: str, text: str,
+    username: "str | None" = None, icon_emoji: "str | None" = None,
 ) -> "tuple[str | None, bool, str]":
     """Best-effort summary post. Never raises; returns ``(ts, posted, reason)``."""
 
     try:
-        response = client.chat_postMessage(channel=channel, text=text)
+        response = client.chat_postMessage(
+            channel=channel, text=text, username=username, icon_emoji=icon_emoji
+        )
     except Exception as exc:  # noqa: BLE001 - Slack API failure must never crash the run.
         logger.error(
             "slack_delivery: chat.postMessage (summary) raised (%s: %s) - "
@@ -319,7 +351,8 @@ def _post_summary(
 
 
 def _post_detail_chunks(
-    client: SlackClient, *, channel: str, chunks: "list[str]", thread_ts: "str | None"
+    client: SlackClient, *, channel: str, chunks: "list[str]", thread_ts: "str | None",
+    username: "str | None" = None, icon_emoji: "str | None" = None,
 ) -> "tuple[int, str]":
     """Best-effort sequential chunk posting. Never raises; returns ``(posted, reason)``.
 
@@ -335,7 +368,10 @@ def _post_detail_chunks(
     posted = 0
     for index, chunk in enumerate(chunks):
         try:
-            response = client.chat_postMessage(channel=channel, text=chunk, thread_ts=thread_ts)
+            response = client.chat_postMessage(
+                channel=channel, text=chunk, thread_ts=thread_ts,
+                username=username, icon_emoji=icon_emoji,
+            )
         except Exception as exc:  # noqa: BLE001 - Slack API failure must never crash the run.
             logger.error(
                 "slack_delivery: chat.postMessage (detail chunk %d/%d) "
@@ -383,6 +419,8 @@ def deliver_shadow_report(
     problem_summary: str = "",
     channel: Optional[str],
     token: Optional[str] = None,
+    username: Optional[str] = None,
+    icon_emoji: Optional[str] = None,
     client_factory: SlackClientFactory = default_slack_client_factory,
     token_env: "dict[str, str] | None" = None,
     secrets_client_factory: "Callable[[], SecretsManagerClient] | None" = None,
@@ -482,14 +520,18 @@ def deliver_shadow_report(
             problem_summary=problem_summary,
         )
     )
+    sender_name, sender_icon = _resolve_identity(username, icon_emoji, token_env)
+
     summary_ts, summary_posted, summary_reason = _post_summary(
-        client, channel=channel, text=summary_text
+        client, channel=channel, text=summary_text,
+        username=sender_name, icon_emoji=sender_icon,
     )
 
     detail_text = redact_secrets(_build_detail_text(run_result, candidate_diff=candidate_diff))
     chunks = chunk_markdown(detail_text, max_chars=SLACK_TEXT_CHUNK_LIMIT)
     posted, detail_reason = _post_detail_chunks(
-        client, channel=channel, chunks=chunks, thread_ts=summary_ts
+        client, channel=channel, chunks=chunks, thread_ts=summary_ts,
+        username=sender_name, icon_emoji=sender_icon,
     )
 
     return SlackDeliveryResult(

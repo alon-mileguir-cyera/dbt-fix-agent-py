@@ -38,9 +38,10 @@ class _FakeSlackClient:
         self._error = error
         self._not_ok_at = not_ok_at or set()
 
-    def chat_postMessage(self, *, channel, text, thread_ts=None):
+    def chat_postMessage(self, *, channel, text, thread_ts=None, username=None, icon_emoji=None):
         index = len(self.calls)
-        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts})
+        self.calls.append({"channel": channel, "text": text, "thread_ts": thread_ts,
+                           "username": username, "icon_emoji": icon_emoji})
         if index in self._fail_at:
             raise (self._error or RuntimeError("simulated Slack API failure"))
         if index in self._not_ok_at:
@@ -101,6 +102,32 @@ def test_delivers_summary_and_detail_for_every_status():
         assert run_result.glyph() in summary["text"]
         assert status in summary["text"]
         assert len(_detail_calls(client)) >= 1
+
+
+def test_posts_carry_custom_sender_identity():
+    """Every post (summary + threaded detail) sets username/icon_emoji so the
+    fixer appears as its own sender via the bi-automations bot."""
+    client = _FakeSlackClient()
+    deliver_shadow_report(
+        run_result=_run_result(status="proposed"),
+        failure_kind="audit",
+        channel="#dbt-fixer",
+        token="xoxb-test",
+        client_factory=lambda t, c=client: c,
+    )
+    assert client.calls, "expected posts"
+    for c in client.calls:
+        assert c["username"] == "dbt fixer agent"
+        assert c["icon_emoji"] == ":wrench:"
+
+    client2 = _FakeSlackClient()
+    deliver_shadow_report(
+        run_result=_run_result(status="proposed"), failure_kind="audit", channel="#c",
+        token="xoxb-test", client_factory=lambda t, c=client2: c,
+        token_env={"DBT_FIXER_SLACK_USERNAME": "custom", "DBT_FIXER_SLACK_ICON_EMOJI": ":robot_face:"},
+    )
+    assert client2.calls[0]["username"] == "custom"
+    assert client2.calls[0]["icon_emoji"] == ":robot_face:"
 
 
 def test_summary_contains_failure_kind_reason_and_gate_scoreboard():

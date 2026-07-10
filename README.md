@@ -104,6 +104,8 @@ pytest -m real_process tests/real_process
 | `DBT_FIXER_PR_URL` | no | `""` | Free text; no validation. |
 | `DBT_FIXER_FAILURE_CONTEXT` | no | `""` | Free text; an empty or unparseable value is handled by `dbt_fixer.intake`, resolving the run to `no_safe_fix` with a specific reason — never treated as an environment error. |
 | `DBT_FIXER_SLACK_CHANNEL` | no | `None` | Free text; unset means Slack delivery is skipped (a no-op), not an error. |
+| `DBT_FIXER_SLACK_USERNAME` | no | `dbt fixer agent` | Sender name shown on Slack posts (`chat.postMessage` `username` override; requires the bi-automations bot's `chat:write.customize` scope). |
+| `DBT_FIXER_SLACK_ICON_EMOJI` | no | `:wrench:` | Sender icon emoji for Slack posts (`icon_emoji` override). |
 | `DBT_FIXER_AUDITOR_PYTHON` | no | `None` | Free text path to the sibling auditor's interpreter; unset is a hard `no_safe_fix` at re-audit-gate time (a later sprint), never a skipped gate. |
 | `DBT_FIXER_MAX_ROUNDS` | no | `3` | Non-numeric, or outside `[1, 10]` → falls back to `3` and records a warning (never crashes, never clamps to the nearest bound). |
 | `DBT_FIXER_MAX_CHANGED_FILES` | no | `5` | Non-numeric, or outside `[1, 50]` → falls back to `5` and records a warning. Enforced by the Sprint 3 allowlist gate. |
