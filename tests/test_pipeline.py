@@ -196,3 +196,39 @@ def test_run_stage1_allows_mechanical_critical_to_proceed(tmp_path):
     }
     outcome = run_stage1(env)
     assert outcome.terminal is None  # proceeds to the fix attempt
+
+
+def test_run_stage1_declines_advisory_only_up_front(tmp_path):
+    """An advisory-only NEEDS_REVIEW (no blocking check) declines up front as
+    no_safe_fix - the fixer only fixes blocking checks, and must never engage a
+    proposal round on an advisory finding (e.g. a now-advisory destructive op),
+    rather than relying on the allowlist to catch the attempted edit."""
+    report = (
+        "# Verdict: **NEEDS_REVIEW**\n\n"
+        "### Destructive Operation Safety (`destructive_operation_safety`)\n\n"
+        "**Severity:** Advisory &nbsp; **State:** **FAIL**\n\n"
+        "**Evidence:**\n\n> unguarded TRUNCATE post_hook\n\n"
+        "### SQL Style and Testability (`sql_style_and_testability`)\n\n"
+        "**Severity:** Advisory &nbsp; **State:** **FAIL**\n\n"
+        "**Evidence:**\n\n> undocumented hook\n"
+    )
+    env = {
+        ENV_FAILURE_KIND: "audit",
+        ENV_REPO_PATH: str(tmp_path),
+        ENV_FAILURE_CONTEXT: report,
+    }
+    outcome = run_stage1(env)
+    assert outcome.terminal is not None
+    assert outcome.terminal.status == "no_safe_fix"
+    assert "advisory" in outcome.terminal.reason.lower()
+    # A blocking critical alongside the advisory still proceeds (fix the block).
+    mixed = report.replace(
+        "### SQL Style and Testability (`sql_style_and_testability`)\n\n"
+        "**Severity:** Advisory &nbsp; **State:** **FAIL**\n\n"
+        "**Evidence:**\n\n> undocumented hook\n",
+        "### Schema Contract Verification (`schema_contract_verification`)\n\n"
+        "**Severity:** Critical &nbsp; **State:** **FAIL**\n\n"
+        "**Evidence:**\n\n> declared column not in output\n",
+    )
+    outcome_mixed = run_stage1({**env, ENV_FAILURE_CONTEXT: mixed})
+    assert outcome_mixed.terminal is None  # blocking check present -> proceed

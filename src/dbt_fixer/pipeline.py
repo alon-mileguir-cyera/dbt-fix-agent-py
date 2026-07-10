@@ -108,4 +108,26 @@ def run_stage1(env: Optional[Mapping[str, str]] = None) -> Stage1Outcome:
                 ),
             )
 
+        # Nothing BLOCKING to fix: every failing check is advisory (a human-review
+        # flag, e.g. destructive-operation-safety, now advisory, or SQL style).
+        # The fixer is only responsible for blocking checks, and the allowlist
+        # forbids the doc/style edits that would clear an advisory anyway, so a
+        # proposal round here always ends in no_safe_fix. Decline up front - this
+        # also keeps the fixer from ever attempting to touch an advisory finding
+        # (e.g. editing a destructive post-hook), which it must not auto-fix,
+        # instead of relying on a downstream allowlist pattern to catch it.
+        if not target.blocking_identifiers:
+            advisory_ids = ", ".join(target.identifiers) or "none"
+            return Stage1Outcome(
+                config=config,
+                intake=intake,
+                terminal=RunResult(
+                    status="no_safe_fix",
+                    reason=(
+                        "only advisory findings are present (no blocking check to "
+                        f"fix); these are for human review, not auto-fix: {advisory_ids}"
+                    ),
+                ),
+            )
+
     return Stage1Outcome(config=config, intake=intake, terminal=None)
