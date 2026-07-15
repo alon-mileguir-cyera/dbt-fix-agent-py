@@ -54,6 +54,7 @@ def run_fix_pipeline(
     feedback: Optional[str] = None,
     preloaded_files: Optional[str] = None,
     blocking_scope: Optional[Sequence[str]] = None,
+    finalizer_runner: Optional[ModelRunner] = None,
 ) -> FixPipelineResult:
     """Run one full, offline, read-propose-apply-diff pipeline pass.
 
@@ -70,6 +71,11 @@ def run_fix_pipeline(
             `dbt_fixer.proposal.build_proposal_prompt`), threaded straight
             through into this round's prompt. `None` (the default) produces
             the exact same prompt as a first-round call always has.
+        preloaded_files: Optional already nonce-fenced repository evidence.
+        blocking_scope: Optional check IDs limiting the proposal's scope.
+        finalizer_runner: A distinct tool-free runner for one empty/malformed
+            output recovery turn. If absent, proposal parsing fails closed;
+            `runner` is never reused as the finalizer.
 
     Returns:
         A `FixPipelineResult`. `ok=True` with `diff` set on success;
@@ -82,7 +88,9 @@ def run_fix_pipeline(
     prompt = build_proposal_prompt(
         fenced_context, feedback, preloaded_files, blocking_scope=blocking_scope
     )
-    pass_result = run_proposal_pass(runner, prompt, budget)
+    pass_result = run_proposal_pass(
+        runner, prompt, budget, finalizer_runner=finalizer_runner
+    )
 
     if not pass_result.ok:
         return FixPipelineResult(

@@ -51,6 +51,7 @@ from .pipeline import run_stage1
 from .redaction import redact_secrets
 from .retry_loop import FixAttemptResult, run_bounded_fix_attempt
 from .runners import (
+    build_real_finalizer_runner,
     build_real_model_runner,
     build_real_refuter_runner,
     real_dbt_subprocess_runner,
@@ -122,6 +123,7 @@ def default_run_fix_attempt(
     refuter_budget = ExecutionBudget(bounds)
 
     model_runner = build_real_model_runner(repo_root, proposal_budget)
+    finalizer_runner = build_real_finalizer_runner(repo_root)
     refuter_runner = build_real_refuter_runner(repo_root, refuter_budget)
 
     return run_bounded_fix_attempt(
@@ -130,6 +132,7 @@ def default_run_fix_attempt(
         fenced_context=fenced_context,
         repo_root=repo_root,
         model_runner=model_runner,
+        finalizer_runner=finalizer_runner,
         subprocess_runner=real_reaudit_subprocess_runner,
         refuter_runner=refuter_runner,
         dbt_subprocess_runner=real_dbt_subprocess_runner,

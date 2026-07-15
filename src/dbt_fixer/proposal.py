@@ -12,12 +12,11 @@ unrecognized edit `"type"`, extra unexpected keys at either the top level
 or the edit level -- is treated as *no proposal at all*, never guessed at
 or partially accepted.
 
-The model pass itself runs through the Sprint 1 `dbt_fixer.bounds`
-primitive (`ExecutionBudget`): a turn is recorded before the model is ever
-invoked, and any `BoundedExecutionError` raised either by that bookkeeping
-or by the runner itself (e.g. because a repo-tool call it made internally
-blew the tool-call cap) resolves to an honest "no proposal" result rather
-than hanging or looping.
+The model pass itself runs through both Sprint 1 `dbt_fixer.bounds`
+primitives: `ExecutionBudget` records each turn/tool allowance, while
+`run_with_hard_timeout` bounds the primary and tool-free-finalizer model calls
+by the shared budget's remaining wall-clock time. Any boundary failure resolves
+to an honest "no proposal" result rather than hanging or looping.
 """
 
 from __future__ import annotations
@@ -28,7 +27,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Optional, Sequence, Tuple
 
-from .bounds import BoundedExecutionError, ExecutionBudget
+from .bounds import (
+    BoundedExecutionError,
+    ExecutionBudget,
+    TimeoutExceededError,
+    run_with_hard_timeout,
+)
 from .fencing import FencedContext, fence_field, generate_nonce
 from .model_output import extract_json_object
 from .pathsafe import resolve_within_root
@@ -108,13 +112,12 @@ Rules:
 # one bounded, tool-free finalization nudge converts the stall into an
 # answer. The prior narration is included so a fresh-context call can still
 # finalize from the analysis already done.
-FINALIZATION_INSTRUCTIONS = """Your previous response analyzed the failure and described a fix, but never
-emitted the required JSON object. Based ONLY on the analysis below, output
-the single JSON object now, in exactly the schema you were given (edits +
-rationale). No tool calls, no prose, no markdown outside the JSON.
-
-## Your previous analysis
-
+FINALIZATION_INSTRUCTIONS = """The primary proposal pass returned no usable JSON object.
+You have no tools. Based ONLY on the original structured-proposal request and
+the prior response below, output the single JSON object now, in exactly the
+schema you were given (edits + rationale). No prose or markdown outside the
+JSON. If the supplied evidence is insufficient for a safe minimal fix, return
+an empty edits list with a concrete rationale instead of guessing.
 """
 
 
@@ -248,7 +251,7 @@ def parse_proposal(raw: object) -> Optional[Proposal]:
     text, a JSON value that is not an object, an object missing `"edits"`
     or `"rationale"`, an object with any extra top-level key, an empty or
     non-list `"edits"`, or *any* individual edit that fails to match one of
-    the two closed schemas exactly (including an edit `"type"` outside the
+    the three closed schemas exactly (including an edit `"type"` outside the
     known set, or a free-form field that doesn't fit either shape). A
     single bad edit invalidates the whole proposal rather than being
     silently dropped -- silently shrinking the edit list is exactly the
@@ -326,7 +329,8 @@ def render_preloaded_files(repo_root: "str | Path", paths: Sequence[str]) -> str
         if len(text.encode("utf-8")) > _MAX_PRELOAD_BYTES:
             text = text.encode("utf-8")[:_MAX_PRELOAD_BYTES].decode("utf-8", "ignore")
             text += "\n... [truncated for prompt size] ..."
-        blocks.append(f"### `{rel}`\n\n```\n{text}\n```")
+        fenced_file = fence_field("preloaded_file", text, generate_nonce()).rendered
+        blocks.append(f"### `{rel}`\n\n{fenced_file}")
     if not blocks:
         return ""
     return (
@@ -417,8 +421,42 @@ class ProposalPassResult:
         return self.proposal is not None
 
 
+def _run_model_with_budget(
+    runner: ModelRunner,
+    prompt: str,
+    budget: ExecutionBudget,
+) -> object:
+    """Run one model boundary within the budget's remaining hard deadline."""
+
+    remaining = budget.bounds.timeout_seconds - budget.elapsed_seconds
+    if remaining <= 0:
+        raise TimeoutExceededError(
+            "shared wall-clock budget was exhausted before the model call"
+        )
+
+    kind, value = run_with_hard_timeout(lambda: runner(prompt), remaining)
+    if kind == "timeout":
+        raise TimeoutExceededError(
+            "model call exceeded the shared remaining wall-clock budget "
+            f"of {remaining:.2f}s"
+        )
+    if kind == "error":
+        if isinstance(value, BaseException):
+            raise value
+        raise RuntimeError(f"model boundary returned an invalid error value: {value!r}")
+
+    # Defend against a call that returned at the deadline boundary: a result
+    # received after the shared budget expired is never accepted.
+    budget.check_timeout()
+    return value
+
+
 def run_proposal_pass(
-    runner: ModelRunner, prompt: str, budget: ExecutionBudget
+    runner: ModelRunner,
+    prompt: str,
+    budget: ExecutionBudget,
+    *,
+    finalizer_runner: Optional[ModelRunner] = None,
 ) -> ProposalPassResult:
     """Run one bounded structured-fix-proposal pass.
 
@@ -446,7 +484,7 @@ def run_proposal_pass(
         )
 
     try:
-        raw = runner(prompt)
+        raw = _run_model_with_budget(runner, prompt, budget)
     except BoundedExecutionError as exc:
         return ProposalPassResult(
             proposal=None,
@@ -461,21 +499,63 @@ def run_proposal_pass(
     raw_text = raw if isinstance(raw, str) else None
     proposal = parse_proposal(raw)
 
-    if proposal is None and raw_text and parse_declination(raw_text) is None:
-        # Finalization fallback: narration without JSON. One more bounded,
-        # tool-free nudge; a second miss falls through to the normal
-        # fail-closed path.
-        try:
-            budget.record_turn()
+    finalization_failure: Optional[str] = None
+    if proposal is None and parse_declination(raw_text) is None:
+        # Finalization fallback: empty output or narration without JSON. One
+        # more bounded nudge runs in a fresh, tool-free production agent. The
+        # original prompt is included because an empty primary response has
+        # no analysis to reflect; all PR-controlled material remains inside
+        # the original prompt's untrusted fences.
+        if finalizer_runner is None:
+            finalization_failure = "tool-free finalizer was not provided"
+        else:
+            try:
+                budget.record_turn()
+            except BoundedExecutionError as exc:
+                return ProposalPassResult(
+                    proposal=None,
+                    no_proposal_reason=(
+                        "execution budget exceeded before finalization could "
+                        f"start: {exc}"
+                    ),
+                    raw_output=raw_text,
+                )
+
             # Re-fence the reflected prior output (red-team injection #2):
             # attacker content echoed into the model's first (unparseable)
             # narration must not re-enter this nudge UNFENCED as "your
             # previous response". Wrap it in an untrusted marker.
+            prior_response = raw_text[-6000:] if raw_text else "<empty response>"
             retry_prompt = (
                 FINALIZATION_INSTRUCTIONS
-                + fence_field("prior_response", raw_text[-6000:], generate_nonce()).rendered
+                + "\n\n## Original structured-proposal request\n\n"
+                + prompt
+                + "\n\n## Prior response\n\n"
+                + fence_field("prior_response", prior_response, generate_nonce()).rendered
             )
-            raw_retry = runner(retry_prompt)
+            try:
+                raw_retry = _run_model_with_budget(
+                    finalizer_runner, retry_prompt, budget
+                )
+            except BoundedExecutionError as exc:
+                return ProposalPassResult(
+                    proposal=None,
+                    no_proposal_reason=(
+                        "execution budget exceeded during tool-free "
+                        f"finalization: {exc}"
+                    ),
+                    raw_output=raw_text,
+                )
+            except Exception as exc:  # untrusted external model boundary
+                return ProposalPassResult(
+                    proposal=None,
+                    no_proposal_reason=(
+                        "tool-free finalizer raised an unexpected error: "
+                        f"{exc!r}"
+                    ),
+                    raw_output=raw_text,
+                )
+
             retry_proposal = parse_proposal(raw_retry)
             if retry_proposal is not None:
                 return ProposalPassResult(
@@ -489,10 +569,9 @@ def run_proposal_pass(
                     raw_output=raw_retry,
                 )
             raw_text = raw_retry if isinstance(raw_retry, str) else raw_text
-        except BoundedExecutionError:
-            pass  # budget exhausted - fall through to the honest failure below
-        except Exception:  # noqa: BLE001 - the runner is an untrusted boundary
-            pass
+            finalization_failure = (
+                "tool-free finalizer output did not match the required schema"
+            )
 
     if proposal is None:
         declination = parse_declination(raw_text)
@@ -507,12 +586,15 @@ def run_proposal_pass(
                 "output (redacted, first 2000 chars): %s",
                 redact_secrets((raw_text or "")[:2000]),
             )
+        schema_reason = "model output did not match the required structured-proposal schema"
+        if finalization_failure:
+            schema_reason += f" ({finalization_failure})"
         return ProposalPassResult(
             proposal=None,
             no_proposal_reason=(
                 f"model found no safe fix: {declination}"
                 if declination is not None
-                else "model output did not match the required structured-proposal schema"
+                else schema_reason
             ),
             raw_output=raw_text,
         )

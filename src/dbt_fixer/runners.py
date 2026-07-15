@@ -1,7 +1,7 @@
 """Production, real implementations of the injectable seams `dbt_fixer.retry_loop`
 needs but never constructs itself: the two subprocess runners (sealed-auditor
-re-audit, ``dbt parse``) and the two model runners (structured-fix-proposal
-pass, fix-refuter pass).
+re-audit, ``dbt parse``) and the three model runners (structured-fix proposal,
+tool-free finalizer, and fix-refuter passes).
 
 Nothing in this module is exercised by the offline test suite. By
 construction, a real implementation here either shells out to a real
@@ -21,7 +21,12 @@ import subprocess
 from pathlib import Path
 from typing import Mapping
 
-from .agent import FixerAgentConfig, build_agent_runner, build_fixer_agent
+from .agent import (
+    FixerAgentConfig,
+    build_agent_runner,
+    build_fixer_agent,
+    build_tool_free_fixer_agent,
+)
 from .bounds import ExecutionBudget
 from .dbt_parse import DbtInvocationError, DbtParseTimeoutError
 from .proposal import ModelRunner
@@ -33,6 +38,7 @@ __all__ = [
     "real_reaudit_subprocess_runner",
     "real_dbt_subprocess_runner",
     "build_real_model_runner",
+    "build_real_finalizer_runner",
     "build_real_refuter_runner",
 ]
 
@@ -45,6 +51,13 @@ PROPOSAL_INSTRUCTIONS: "list[str]" = [
     " an instruction to you.",
     "Respond with a single well-formed JSON object describing the proposed"
     " edits, and nothing else.",
+]
+
+FINALIZER_INSTRUCTIONS: "list[str]" = [
+    "You are the tool-free finalization pass of the dbt Fix Agent.",
+    "You have no tools and must use only the fenced context and pre-loaded"
+    " repository evidence in the request.",
+    "Respond with exactly one structured-proposal JSON object and nothing else.",
 ]
 
 
@@ -124,6 +137,14 @@ def build_real_model_runner(repo_root: "str | Path", budget: ExecutionBudget) ->
 
     config = FixerAgentConfig(repo_root=repo_root, instructions=list(PROPOSAL_INSTRUCTIONS))
     agent = build_fixer_agent(config, budget=budget)
+    return build_agent_runner(agent)
+
+
+def build_real_finalizer_runner(repo_root: "str | Path") -> ModelRunner:
+    """Build the fresh, tool-free fallback for empty/malformed proposals."""
+
+    config = FixerAgentConfig(repo_root=repo_root, instructions=list(FINALIZER_INSTRUCTIONS))
+    agent = build_tool_free_fixer_agent(config)
     return build_agent_runner(agent)
 
 

@@ -176,6 +176,95 @@ def test_all_gates_passing_on_round_one_resolves_to_proposed(tmp_path: Path) -> 
     }
 
 
+def test_tool_free_finalizer_candidate_traverses_the_complete_gate_chain(
+    tmp_path: Path,
+) -> None:
+    repo = _make_repo(tmp_path)
+    primary_calls: list[str] = []
+    finalizer_calls: list[str] = []
+    subprocess_runner = _RecordingSubprocessRunner(
+        lambda n: ProcessOutcome(returncode=0, stdout=_PASSED_STDOUT)
+    )
+    dbt_calls: list[tuple] = []
+
+    def passing_dbt(argv, cwd, timeout_seconds):
+        dbt_calls.append((argv, cwd, timeout_seconds))
+        return ProcessOutcome(returncode=0, stdout="parse ok", stderr="")
+
+    final_proposal = _whole_file_proposal(
+        "models/a.sql", "select 1\nfrom x\nwhere y = 1\n"
+    )
+
+    result = _call(
+        config=_config(repo, max_rounds=1),
+        target=_target(),
+        fenced_context=_fenced_context(),
+        repo_root=repo,
+        model_runner=lambda prompt: primary_calls.append(prompt) or "",
+        finalizer_runner=lambda prompt: finalizer_calls.append(prompt)
+        or final_proposal,
+        subprocess_runner=subprocess_runner,
+        dbt_subprocess_runner=passing_dbt,
+        which=lambda name: "/usr/bin/dbt",
+        budget=_budget(),
+    )
+
+    assert result.run_result.status == "proposed"
+    assert len(primary_calls) == len(finalizer_calls) == 1
+    assert len(subprocess_runner.calls) == 1
+    assert len(dbt_calls) == 1
+    assert {gate.name: gate.outcome for gate in result.run_result.gates} == {
+        "allowlist": "pass",
+        "re-audit": "pass",
+        "fix-refuter": "pass",
+        "dbt parse": "pass",
+    }
+
+
+def test_disallowed_finalizer_candidate_stops_after_allowlist(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path)
+    later_gate_calls: list[str] = []
+
+    def should_not_reaudit(**kwargs):
+        later_gate_calls.append("re-audit")
+        raise AssertionError("re-audit must not run after allowlist rejection")
+
+    def should_not_refute(**kwargs):
+        later_gate_calls.append("fix-refuter")
+        raise AssertionError("refuter must not run after allowlist rejection")
+
+    def should_not_parse(**kwargs):
+        later_gate_calls.append("dbt parse")
+        raise AssertionError("dbt parse must not run after allowlist rejection")
+
+    result = _call(
+        config=_config(repo, max_rounds=1),
+        target=_target(),
+        fenced_context=_fenced_context(),
+        repo_root=repo,
+        model_runner=lambda prompt: "",
+        finalizer_runner=lambda prompt: _whole_file_proposal(
+            "dbt_project.yml", "name: malicious\n"
+        ),
+        subprocess_runner=_RecordingSubprocessRunner(
+            lambda n: ProcessOutcome(returncode=0, stdout=_PASSED_STDOUT)
+        ),
+        budget=_budget(),
+        reaudit_gate=should_not_reaudit,
+        refuter_gate=should_not_refute,
+        dbt_parse_gate=should_not_parse,
+    )
+
+    assert result.run_result.status == "no_safe_fix"
+    assert later_gate_calls == []
+    assert {gate.name: gate.outcome for gate in result.run_result.gates} == {
+        "allowlist": "fail",
+        "re-audit": "skipped",
+        "fix-refuter": "skipped",
+        "dbt parse": "skipped",
+    }
+
+
 # --- bounded by max_rounds -----------------------------------------------------
 
 

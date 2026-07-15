@@ -15,9 +15,11 @@ import pytest
 
 from dbt_fixer.agent import (
     FixerAgentConfig,
+    build_agent_runner,
     build_bedrock_model,
     build_fixer_agent,
     build_repo_toolkit,
+    build_tool_free_fixer_agent,
 )
 from dbt_fixer.bounds import Bounds, ExecutionBudget, ToolCallCapExceededError
 from dbt_fixer.tools.repo_tools import RepoTools
@@ -121,3 +123,37 @@ def test_build_fixer_agent_wires_read_only_toolkit(tmp_path: Path) -> None:
     assert len(toolkits) == 1
     assert set(toolkits[0].functions.keys()) == {"read_repo_file", "search_repo_files"}
     assert agent.tool_call_limit == 5
+
+
+def test_build_tool_free_fixer_agent_exposes_no_tools(tmp_path: Path) -> None:
+    config = FixerAgentConfig(repo_root=_make_repo(tmp_path))
+
+    agent = build_tool_free_fixer_agent(config)
+
+    assert not agent.tools
+    assert agent.tool_call_limit is None
+
+
+def test_agent_runner_serializes_mapping_content_as_json() -> None:
+    class FakeAgent:
+        def run(self, prompt):
+            return type("Output", (), {"content": {"edits": [], "rationale": "safe"}})()
+
+    raw = build_agent_runner(FakeAgent())("prompt")  # type: ignore[arg-type]
+
+    assert raw == '{"edits": [], "rationale": "safe"}'
+
+
+def test_agent_runner_serializes_model_dump_content_as_json() -> None:
+    class StructuredContent:
+        def model_dump(self, *, mode=None):
+            assert mode == "json"
+            return {"edits": [], "rationale": "structured"}
+
+    class FakeAgent:
+        def run(self, prompt):
+            return type("Output", (), {"content": StructuredContent()})()
+
+    raw = build_agent_runner(FakeAgent())("prompt")  # type: ignore[arg-type]
+
+    assert raw == '{"edits": [], "rationale": "structured"}'
