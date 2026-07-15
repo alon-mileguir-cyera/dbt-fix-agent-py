@@ -91,6 +91,32 @@ def test_pipeline_returns_no_proposal_result_for_malformed_model_output(tmp_path
     assert result.proposal_pass is not None and not result.proposal_pass.ok
 
 
+def test_pipeline_threads_tool_free_finalizer_for_empty_primary_output(tmp_path: Path) -> None:
+    repo_root = _make_repo(tmp_path)
+    final_raw = json.dumps(
+        {
+            "edits": [
+                {"type": "whole_file_replace", "path": "models/a.sql", "content": "select 2\n"}
+            ],
+            "rationale": "finalized from pre-loaded evidence",
+        }
+    )
+    finalizer_prompts: list[str] = []
+
+    result = run_fix_pipeline(
+        repo_root,
+        _fenced_context(),
+        lambda prompt: "",
+        ExecutionBudget(Bounds()),
+        finalizer_runner=lambda prompt: finalizer_prompts.append(prompt) or final_raw,
+    )
+
+    assert result.ok
+    assert len(finalizer_prompts) == 1
+    assert "Original structured-proposal request" in finalizer_prompts[0]
+    assert result.diff is not None and "+select 2" in result.diff
+
+
 def test_pipeline_fails_closed_for_a_proposal_targeting_a_missing_file(tmp_path: Path) -> None:
     repo_root = _make_repo(tmp_path)
     raw = json.dumps(

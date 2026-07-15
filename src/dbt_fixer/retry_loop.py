@@ -116,6 +116,7 @@ def run_bounded_fix_attempt(
     refuter_runner: RefuterRunner,
     dbt_subprocess_runner: DbtSubprocessRunner,
     budget: ExecutionBudget,
+    finalizer_runner: Optional[ModelRunner] = None,
     allowlist_gate: AllowlistGateRunner = run_allowlist_gate,
     reaudit_gate: ReAuditGateRunner = run_reaudit_gate,
     refuter_gate: RefuterGateRunner = run_fix_refuter_gate,
@@ -140,6 +141,9 @@ def run_bounded_fix_attempt(
             fix-refuter prompt.
         repo_root: The original, never-mutated checkout root.
         model_runner: The structured-fix-proposal model runner.
+        finalizer_runner: Optional distinct tool-free model runner for one
+            empty/malformed-output recovery turn. Production always supplies
+            one; omission fails closed and never reuses `model_runner`.
         subprocess_runner: The injectable auditor-subprocess runner (a fake
             in every test; never a real subprocess).
         refuter_runner: The injectable fix-refuter model runner (a fake in
@@ -200,6 +204,7 @@ def run_bounded_fix_attempt(
                 repo_root, fenced_context, model_runner, budget,
                 feedback=feedback, preloaded_files=preloaded_files,
                 blocking_scope=originally_failing_ids,
+                finalizer_runner=finalizer_runner,
             )
             if not pipeline_result.ok:
                 last_reason = pipeline_result.reason or "no proposal was produced"

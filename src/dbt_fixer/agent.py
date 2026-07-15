@@ -25,7 +25,9 @@ against an isolated scratch copy the model itself never has tool access to.
 
 from __future__ import annotations
 
+import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -185,6 +187,25 @@ def build_fixer_agent(config: FixerAgentConfig, *, budget: Optional[ExecutionBud
     )
 
 
+def build_tool_free_fixer_agent(config: FixerAgentConfig) -> Agent:
+    """Build a fresh proposal-finalization agent with no callable tools.
+
+    The primary proposal agent may legitimately finish a tool loop without
+    emitting text.  Its bounded fallback must therefore use a separate model
+    context that cannot continue exploring the repository.  All repository
+    evidence needed by this pass is carried in the prompt; the agent exposes
+    no toolkit and has no write path.
+    """
+
+    model = build_bedrock_model(config)
+    return Agent(
+        model=model,
+        instructions=config.instructions,
+        markdown=False,
+        reasoning=False,
+    )
+
+
 def build_agent_runner(agent: Agent) -> Callable[[str], str]:
     """Adapt an agno `Agent` into the plain `Callable[[str], str]` "runner"
     shape `dbt_fixer.proposal.run_proposal_pass` expects.
@@ -201,6 +222,16 @@ def build_agent_runner(agent: Agent) -> Callable[[str], str]:
         content = getattr(run_output, "content", None)
         if content is None:
             return ""
-        return content if isinstance(content, str) else str(content)
+        if isinstance(content, str):
+            return content
+        if isinstance(content, Mapping):
+            return json.dumps(dict(content))
+        model_dump = getattr(content, "model_dump", None)
+        if callable(model_dump):
+            try:
+                return json.dumps(model_dump(mode="json"))
+            except TypeError:
+                return json.dumps(model_dump())
+        return str(content)
 
     return _run

@@ -40,9 +40,10 @@ terminal Stage 1 result (bad environment, or an unparseable failure
 context) is final. Otherwise the bounded propose/apply/gate loop
 (`dbt_fixer.retry_loop.run_bounded_fix_attempt`) runs against real,
 production seams (`dbt_fixer.runners`: a Bedrock-backed model runner for
-the proposal pass, an independently-constructed one for the fix-refuter
-pass, and real subprocess runners for the sealed-auditor re-audit and
-`dbt parse` gates). Whatever that attempt resolves to — `proposed`,
+the proposal pass, a fresh tool-free finalizer for empty/malformed proposal
+output, an independently-constructed runner for the fix-refuter pass, and
+real subprocess runners for the sealed-auditor re-audit and `dbt parse`
+gates). Whatever that attempt resolves to — `proposed`,
 `no_safe_fix`, or `failed` — is reported, unconditionally, to Slack
 (`dbt_fixer.slack_delivery.deliver_shadow_report`, which never raises and
 never influences the already-computed result) and then to stdout.
@@ -156,7 +157,7 @@ src/dbt_fixer/
   pathsafe.py         # shared path-containment guard (rejects '..', absolute paths, symlink escapes)
   tools/
     repo_tools.py     # RepoTools: rooted, read-only file read/glob-search -- no write method exists
-  model_output.py      # tolerant-but-never-trusting JSON-object extraction from raw model text
+  model_output.py      # strict whole-response JSON-object extraction from raw model text
   proposal.py           # structured fix-proposal schema (whole_file_replace/line_range_edit) + bounded model pass
   agent.py               # Bedrock/agno agent wiring; the only toolkit it builds exposes read/search only
   applier.py              # fail-closed, two-phase application of a Proposal onto an isolated scratch copy
@@ -188,14 +189,24 @@ found during glob enumeration (while still raising if the `pattern`/
 
 **Structured fix proposals are the only way a fix is ever proposed.**
 `dbt_fixer.proposal.parse_proposal` enforces a closed JSON schema (exact
-top-level and per-edit key sets, no extra fields, only the two edit types
-`whole_file_replace`/`line_range_edit`); any mismatch — malformed JSON, a
-missing field, an extra key, an unrecognized edit type, a single bad edit
-among otherwise-good ones — resolves to `None` ("no proposal"), never a
-partial or guessed acceptance. `dbt_fixer.proposal.run_proposal_pass` runs
-this behind the Sprint 1 `ExecutionBudget`: a turn is recorded before the
-model is ever called, and any `BoundedExecutionError` from the budget or the
-runner itself resolves to an honest no-proposal result rather than hanging.
+top-level and per-edit key sets, no extra fields, only the three edit types
+`whole_file_replace`/`line_range_edit`/`create_file`); any mismatch — malformed
+or ambiguous JSON, a missing field, an extra key, an unrecognized edit type, a
+single bad edit among otherwise-good ones — resolves to `None` ("no proposal"),
+never a partial or guessed acceptance. `dbt_fixer.proposal.run_proposal_pass`
+records every turn in the shared `ExecutionBudget` and wraps both the primary
+and finalizer model boundaries in the remaining hard wall-clock deadline. A
+hanging call, or valid-looking output returned after the deadline, is rejected.
+If the primary agent returns empty or malformed output, one additional turn
+uses a distinct fresh agent with zero tools; omitting that runner fails closed
+instead of reusing the tool-enabled primary. It receives the original request
+and separately nonce-fenced prior response, then must either emit the same
+closed proposal schema or decline with an empty edit list. Preloaded
+PR-controlled repository files are also nonce-fenced, and multiple/echoed JSON
+objects are treated as ambiguous. The allowlist, re-audit, refuter, and
+dbt-parse gates remain unchanged; the fallback can only produce a candidate
+that is applied to the isolated scratch copy, never mutate the original
+checkout, and never write to GitHub.
 
 **Edits are applied only to an isolated scratch copy.** `dbt_fixer.applier.apply_proposal`
 validates every edit in a proposal (target exists, target is a file, every
